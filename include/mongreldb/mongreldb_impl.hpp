@@ -14,6 +14,7 @@
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -62,9 +63,15 @@ void json_value(std::string &out, const Value &v) {
             break;
         }
         case Value::Tag::Double: {
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "%.17g", v.as_double());
-            out += buf;
+            double d = v.as_double();
+            /* NaN and Infinity have no valid JSON representation; emit null. */
+            if (std::isnan(d) || std::isinf(d)) {
+                out += "null";
+            } else {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "%.17g", d);
+                out += buf;
+            }
             break;
         }
         case Value::Tag::String: json_escape(out, v.as_string()); break;
@@ -354,14 +361,24 @@ bool get_bool(const std::string &body, const std::string &key, bool &out) {
 
 size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
     auto *out = static_cast<std::string *>(userdata);
-    out->append(ptr, size * nmemb);
+    try {
+        out->append(ptr, size * nmemb);
+    } catch (...) {
+        /* std::string::append can throw (bad_alloc) and libcurl callbacks
+         * must be noexcept; returning a short count signals an error to
+         * curl_easy_perform, which we then report as a network failure. */
+        return 0;
+    }
     return size * nmemb;
 }
 
 std::string url_encode_segment(const std::string &seg) {
     std::string out;
     for (unsigned char c : seg) {
-        if (c == '/' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        /* '/' must be percent-encoded so a table name like "a/b" cannot
+         * inject an extra path segment. Only unreserved chars (RFC 3986)
+         * pass through unencoded. */
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
             (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
             c == '~') {
             out.push_back(static_cast<char>(c));
@@ -399,38 +416,46 @@ struct MongrelDBClient::Impl {
         }
 
         std::string response;
-
         struct curl_slist *headers = nullptr;
-        headers = curl_slist_append(headers, "Accept: application/json");
-        if (body) {
-            headers = curl_slist_append(headers,
-                                        "Content-Type: application/json");
-        }
 
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout_seconds);
-        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        try {
+            headers = curl_slist_append(headers, "Accept: application/json");
+            if (!headers) throw std::bad_alloc();
+            if (body) {
+                headers = curl_slist_append(headers,
+                                            "Content-Type: application/json");
+                if (!headers) throw std::bad_alloc();
+            }
 
-        if (body) {
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body->c_str());
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,
-                             static_cast<long>(body->size()));
-        }
-
-        std::string auth_header;
-        if (!token.empty()) {
-            auth_header = "Authorization: Bearer " + token;
-            headers = curl_slist_append(headers, auth_header.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
             curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        } else if (!username.empty()) {
-            std::string userpwd = username + ":" + password;
-            curl_easy_setopt(curl, CURLOPT_USERPWD, userpwd.c_str());
-            curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
+            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout_seconds);
+            curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+            if (body) {
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body->c_str());
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,
+                                 static_cast<long>(body->size()));
+            }
+
+            if (!token.empty()) {
+                std::string auth_header = "Authorization: Bearer " + token;
+                headers = curl_slist_append(headers, auth_header.c_str());
+                if (!headers) throw std::bad_alloc();
+                curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+            } else if (!username.empty()) {
+                std::string userpwd = username + ":" + password;
+                curl_easy_setopt(curl, CURLOPT_USERPWD, userpwd.c_str());
+                curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+            }
+        } catch (...) {
+            if (headers) curl_slist_free_all(headers);
+            curl_easy_cleanup(curl);
+            throw;
         }
 
         CURLcode rc = curl_easy_perform(curl);
@@ -492,7 +517,7 @@ struct MongrelDBClient::Impl {
     }
 };
 
-MongrelDBClient::MongrelDBClient(const std::string &url)
+inline MongrelDBClient::MongrelDBClient(const std::string &url)
     : impl_(std::make_unique<Impl>()) {
     impl_->base_url = url.empty() ? kDefaultUrl : url;
     while (!impl_->base_url.empty() &&
@@ -501,28 +526,28 @@ MongrelDBClient::MongrelDBClient(const std::string &url)
     }
 }
 
-MongrelDBClient::MongrelDBClient(const std::string &url,
+inline MongrelDBClient::MongrelDBClient(const std::string &url,
                                  const std::string &token)
     : MongrelDBClient(url) {
     impl_->token = token;
 }
 
-MongrelDBClient::MongrelDBClient(const std::string &url, BasicAuth auth)
+inline MongrelDBClient::MongrelDBClient(const std::string &url, BasicAuth auth)
     : MongrelDBClient(url) {
     impl_->username = std::move(auth.username);
     impl_->password = std::move(auth.password);
 }
 
-MongrelDBClient::~MongrelDBClient() = default;
+inline MongrelDBClient::~MongrelDBClient() = default;
 
-MongrelDBClient::MongrelDBClient(MongrelDBClient &&) noexcept = default;
-MongrelDBClient &MongrelDBClient::operator=(MongrelDBClient &&) noexcept = default;
+inline MongrelDBClient::MongrelDBClient(MongrelDBClient &&) noexcept = default;
+inline MongrelDBClient &MongrelDBClient::operator=(MongrelDBClient &&) noexcept = default;
 
-void MongrelDBClient::set_timeout(long seconds) {
+inline void MongrelDBClient::set_timeout(long seconds) {
     impl_->timeout_seconds = seconds > 0 ? seconds : 30;
 }
 
-bool MongrelDBClient::health() {
+inline bool MongrelDBClient::health() {
     try {
         impl_->get("/health");
         return true;
@@ -531,7 +556,7 @@ bool MongrelDBClient::health() {
     }
 }
 
-std::vector<std::string> MongrelDBClient::table_names() {
+inline std::vector<std::string> MongrelDBClient::table_names() {
     std::string body = impl_->get("/tables");
     std::vector<std::string> names;
     JsonParser j(body);
@@ -554,7 +579,7 @@ std::vector<std::string> MongrelDBClient::table_names() {
     return names;
 }
 
-std::int64_t MongrelDBClient::create_table(const std::string &name,
+inline std::int64_t MongrelDBClient::create_table(const std::string &name,
                                            const std::vector<Column> &columns) {
     std::string body = "{\"name\":";
     json_escape(body, name);
@@ -583,11 +608,11 @@ std::int64_t MongrelDBClient::create_table(const std::string &name,
     return tid;
 }
 
-void MongrelDBClient::drop_table(const std::string &name) {
+inline void MongrelDBClient::drop_table(const std::string &name) {
     impl_->del("/tables/" + url_encode_segment(name));
 }
 
-std::int64_t MongrelDBClient::count(const std::string &table) {
+inline std::int64_t MongrelDBClient::count(const std::string &table) {
     std::string resp = impl_->get("/tables/" +
                                   url_encode_segment(table) + "/count");
     std::int64_t n = 0;
@@ -595,7 +620,7 @@ std::int64_t MongrelDBClient::count(const std::string &table) {
     return n;
 }
 
-void MongrelDBClient::put(const std::string &table,
+inline void MongrelDBClient::put(const std::string &table,
                           const std::vector<Cell> &cells,
                           const std::string &idempotency_key) {
     Op op;
@@ -605,7 +630,7 @@ void MongrelDBClient::put(const std::string &table,
     commit({op}, idempotency_key);
 }
 
-void MongrelDBClient::upsert(const std::string &table,
+inline void MongrelDBClient::upsert(const std::string &table,
                              const std::vector<Cell> &cells,
                              const std::vector<Cell> &update_cells,
                              const std::string &idempotency_key) {
@@ -617,7 +642,7 @@ void MongrelDBClient::upsert(const std::string &table,
     commit({op}, idempotency_key);
 }
 
-void MongrelDBClient::del(const std::string &table, std::int64_t row_id) {
+inline void MongrelDBClient::del(const std::string &table, std::int64_t row_id) {
     Op op;
     op.type = OpType::Delete;
     op.table = table;
@@ -625,7 +650,7 @@ void MongrelDBClient::del(const std::string &table, std::int64_t row_id) {
     commit({op});
 }
 
-void MongrelDBClient::delete_by_pk(const std::string &table, const Value &pk) {
+inline void MongrelDBClient::delete_by_pk(const std::string &table, const Value &pk) {
     Op op;
     op.type = OpType::DeleteByPk;
     op.table = table;
@@ -633,7 +658,7 @@ void MongrelDBClient::delete_by_pk(const std::string &table, const Value &pk) {
     commit({op});
 }
 
-void MongrelDBClient::commit(const std::vector<Op> &ops,
+inline void MongrelDBClient::commit(const std::vector<Op> &ops,
                              const std::string &idempotency_key) {
     if (ops.empty()) return;
     std::string body = "{\"ops\":[";
@@ -690,7 +715,7 @@ void MongrelDBClient::commit(const std::vector<Op> &ops,
     impl_->post("/kit/txn", body);
 }
 
-Result MongrelDBClient::query(const std::string &table,
+inline Result MongrelDBClient::query(const std::string &table,
                               const std::vector<Condition> &conditions,
                               const std::vector<std::int64_t> &projection,
                               std::int64_t limit) {
@@ -887,18 +912,18 @@ Result MongrelDBClient::query(const std::string &table,
     return result;
 }
 
-std::string MongrelDBClient::sql(const std::string &statement) {
+inline std::string MongrelDBClient::sql(const std::string &statement) {
     std::string body = "{\"sql\":";
     json_escape(body, statement);
     body.push_back('}');
     return impl_->post("/sql", body);
 }
 
-std::string MongrelDBClient::schema() {
+inline std::string MongrelDBClient::schema() {
     return impl_->get("/kit/schema");
 }
 
-std::string MongrelDBClient::schema_for(const std::string &table) {
+inline std::string MongrelDBClient::schema_for(const std::string &table) {
     return impl_->get("/kit/schema/" + url_encode_segment(table));
 }
 
