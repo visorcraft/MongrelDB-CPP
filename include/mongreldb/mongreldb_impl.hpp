@@ -361,15 +361,23 @@ bool get_bool(const std::string &body, const std::string &key, bool &out) {
 
 size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
     auto *out = static_cast<std::string *>(userdata);
+    std::size_t n = size * nmemb;
+    /* Cap the download: abort once the buffered body would exceed the limit so
+     * an oversized response is not buffered fully. Returning a short count
+     * signals an error to curl_easy_perform. */
+    if (out->size() > kMaxResponseBytes ||
+        n > kMaxResponseBytes - out->size()) {
+        return 0;
+    }
     try {
-        out->append(ptr, size * nmemb);
+        out->append(ptr, n);
     } catch (...) {
         /* std::string::append can throw (bad_alloc) and libcurl callbacks
          * must be noexcept; returning a short count signals an error to
          * curl_easy_perform, which we then report as a network failure. */
         return 0;
     }
-    return size * nmemb;
+    return n;
 }
 
 std::string url_encode_segment(const std::string &seg) {
@@ -435,6 +443,10 @@ struct MongrelDBClient::Impl {
             curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
             curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout_seconds);
             curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+            /* Cap the response body at 256 MB. The write callback also
+             * enforces this for chunked transfers where the size is unknown. */
+            curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE,
+                             static_cast<curl_off_t>(kMaxResponseBytes));
 
             if (body) {
                 curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body->c_str());
@@ -463,6 +475,15 @@ struct MongrelDBClient::Impl {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
+
+        /* An oversized body aborts the transfer (CURLE_FILESIZE_EXCEEDED from
+         * CURLOPT_MAXFILESIZE_LARGE, or CURLE_WRITE_ERROR from the write
+         * callback) and is reported as a QueryException. */
+        if (rc == CURLE_FILESIZE_EXCEEDED || rc == CURLE_WRITE_ERROR ||
+            response.size() > kMaxResponseBytes) {
+            throw QueryException("mongreldb: response body exceeds " +
+                                 std::to_string(kMaxResponseBytes) + " bytes");
+        }
 
         if (rc != CURLE_OK) {
             std::string msg = "mongreldb: network error: ";
@@ -915,7 +936,7 @@ inline Result MongrelDBClient::query(const std::string &table,
 inline std::string MongrelDBClient::sql(const std::string &statement) {
     std::string body = "{\"sql\":";
     json_escape(body, statement);
-    body.push_back('}');
+    body += ",\"format\":\"json\"}";
     return impl_->post("/sql", body);
 }
 

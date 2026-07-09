@@ -34,6 +34,10 @@ inline constexpr int kVersionPatch = 0;
 
 inline constexpr const char *kDefaultUrl = "http://127.0.0.1:8453";
 
+// Cap on a response body size (256 MB). Bodies larger than this abort the
+// transfer and throw a QueryException.
+inline constexpr std::size_t kMaxResponseBytes = 268435456;
+
 // ── Exception hierarchy ──────────────────────────────────────────────────
 //
 // Every non-2xx response (and any client-side failure) throws a subclass of

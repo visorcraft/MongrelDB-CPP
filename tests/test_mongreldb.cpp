@@ -276,6 +276,21 @@ void fresh_table(const std::string &name,
     g_client->create_table(name, cols);
 }
 
+// cell_int64 returns the int64 value for col_id in a result row, or 0 if
+// absent. *found is set to whether the cell was present and integer-typed.
+std::int64_t cell_int64(const mongreldb::Row &row, std::int64_t col_id,
+                        bool *found) {
+    if (found) *found = false;
+    for (const auto &cell : row) {
+        if (cell.column_id == col_id &&
+            cell.value.tag() == mongreldb::Value::Tag::Int64) {
+            if (found) *found = true;
+            return cell.value.as_int64();
+        }
+    }
+    return 0;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 void test_health() {
@@ -311,6 +326,10 @@ void test_upsert() {
     cond.int_value = 1;
     auto res = g_client->query("cpp_upsert", {cond});
     CHECK(res.rows.size() == 1, "expected 1 row from upsert pk query, got %zu", res.rows.size());
+    bool found = false;
+    std::int64_t pk = cell_int64(res.rows[0], 1, &found);
+    CHECK(found && pk == 1, "expected returned pk 1, got %lld",
+          static_cast<long long>(pk));
     double amount = 0.0;
     for (const auto &cell : res.rows[0]) {
         if (cell.column_id == 2 && cell.value.tag() == mongreldb::Value::Tag::Double) {
@@ -331,6 +350,11 @@ void test_query_by_pk() {
     cond.int_value = 42;
     auto res = g_client->query("cpp_pk", {cond});
     CHECK(res.rows.size() == 1, "expected 1 row, got %zu", res.rows.size());
+    // The returned row must carry the queried PK value.
+    bool found = false;
+    std::int64_t pk = cell_int64(res.rows[0], 1, &found);
+    CHECK(found && pk == 42, "expected returned pk 42, got %lld",
+          static_cast<long long>(pk));
 }
 
 void test_query_range() {
@@ -350,6 +374,14 @@ void test_query_range() {
     // (amount == 120) matches; assert the exact count rather than >= 1.
     CHECK(res.rows.size() == 1, "expected exactly 1 row in range, got %zu", res.rows.size());
     CHECK(!res.truncated, "result should not be truncated");
+    // Verify the PK and amount values of the returned row match the filter.
+    bool found = false;
+    std::int64_t pk = cell_int64(res.rows[0], 1, &found);
+    CHECK(found && pk == 2, "expected returned pk 2, got %lld",
+          static_cast<long long>(pk));
+    std::int64_t amt = cell_int64(res.rows[0], 2, &found);
+    CHECK(found && amt == 120, "expected returned amount 120, got %lld",
+          static_cast<long long>(amt));
 }
 
 void test_transaction_commit() {
@@ -401,7 +433,18 @@ void test_string_values() {
 
 void test_sql() {
     SKIP_IF_NO_DAEMON();
-    g_client->sql("SELECT 1");
+    fresh_table("cpp_sql", {int_col(1, "id", true), int_col(2, "amount", false)});
+    CHECK(g_client->count("cpp_sql") == 0, "expected 0 rows before SQL INSERT");
+
+    // INSERT via SQL must increase the row count.
+    g_client->sql("INSERT INTO cpp_sql (id, amount) VALUES (10, 42)");
+    CHECK(g_client->count("cpp_sql") == 1,
+          "expected count to increase to 1 after SQL INSERT");
+
+    // JSON SQL mode must return the inserted row (a non-empty JSON array).
+    std::string body = g_client->sql("SELECT id, amount FROM cpp_sql");
+    CHECK(!body.empty() && body.front() == '[',
+          "expected JSON array body for SQL SELECT, got '%s'", body.c_str());
 }
 
 void test_table_names() {
