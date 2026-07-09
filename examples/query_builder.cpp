@@ -1,24 +1,27 @@
 // Example: native query builder (range + primary-key lookups) in C++.
 //
-// Build (from the repo root):
+// Build (from the repo root), linking libcurl and the client source:
 //
-//   c++ -std=c++17 -Iinclude examples/query_builder.cpp \
+//   c++ -std=c++17 -Iinclude examples/query_builder.cpp src/mongreldb.cpp
 //       $(pkg-config --cflags --libs libcurl) -o examples/query_builder
 //   ./examples/query_builder
 //
-// Requires a mongreldb-server daemon running on http://127.0.0.1:8453.
+// Requires a mongreldb-server daemon running on http://127.0.0.1:8453, or
+// point MONGRELDB_URL at a running daemon.
 //
 // Creates a table, loads five rows with varying scores, then runs two
 // native queries: a range scan over score in [60, 90], and an exact
 // primary-key lookup for id == 4. Results are printed, then the table is
-// dropped.
+// dropped (even on error).
 
 #include <mongreldb/mongreldb.hpp>
 
+#include <chrono>
+#include <cstdlib>
 #include <iostream>
+#include <string>
 
-static const char *kUrl = "http://127.0.0.1:8453";
-static const char *kTable = "example_query";
+static const char *kUrlDefault = "http://127.0.0.1:8453";
 
 // Build the shared three-column schema used by every example:
 //   col 1 = id (int64, primary key)
@@ -64,27 +67,56 @@ static void print_result(const std::string &label, const mongreldb::Result &res)
     }
 }
 
+// Scope guard: drops the table on destruction unless release()d.
+class TableGuard {
+public:
+    TableGuard(mongreldb::MongrelDBClient &db, const std::string &table)
+        : db_(&db), table_(&table) {}
+    ~TableGuard() {
+        if (db_ && table_) {
+            try { db_->drop_table(*table_); } catch (...) {}
+        }
+    }
+    TableGuard(const TableGuard &) = delete;
+    TableGuard &operator=(const TableGuard &) = delete;
+private:
+    mongreldb::MongrelDBClient *db_;
+    const std::string *table_;
+};
+
 int main() {
+    const char *url = std::getenv("MONGRELDB_URL");
+    if (url == nullptr || url[0] == '\0') {
+        url = kUrlDefault;
+    }
+
     try {
-        mongreldb::MongrelDBClient db(kUrl);
+        mongreldb::MongrelDBClient db(url);
 
         // 1. Health check; bail out if the daemon is unreachable.
         if (!db.health()) {
-            std::cerr << "daemon not reachable at " << kUrl << "\n";
+            std::cerr << "daemon not reachable at " << url << "\n";
             return 1;
         }
         std::cout << "Connected to MongrelDB\n";
 
-        // 2. Create the table.
-        std::int64_t tid = db.create_table(kTable, schema());
-        std::cout << "Created table " << kTable << " (id " << tid << ")\n";
+        // 2. Create the table with a per-run unique name.
+        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch()).count();
+        std::string table = "example_query_" + std::to_string(now);
+
+        std::int64_t tid = db.create_table(table, schema());
+        std::cout << "Created table " << table << " (id " << tid << ")\n";
+
+        // Guaranteed cleanup: drop the table no matter how the body exits.
+        TableGuard guard(db, table);
 
         // 3. Load five rows with varying scores.
-        db.put(kTable, row(1, "Alice", 40.0));
-        db.put(kTable, row(2, "Bob", 65.0));
-        db.put(kTable, row(3, "Carol", 82.0));
-        db.put(kTable, row(4, "Dave", 91.0));
-        db.put(kTable, row(5, "Eve", 12.5));
+        db.put(table, row(1, "Alice", 40.0));
+        db.put(table, row(2, "Bob", 65.0));
+        db.put(table, row(3, "Carol", 82.0));
+        db.put(table, row(4, "Dave", 91.0));
+        db.put(table, row(5, "Eve", 12.5));
         std::cout << "Inserted 5 rows\n";
 
         // 4. Range query: 60 <= score <= 90 (both inclusive).
@@ -98,7 +130,7 @@ int main() {
         range_cond.lo_inclusive = true;
         range_cond.hi_inclusive = true;
 
-        mongreldb::Result res = db.query(kTable, {range_cond});
+        mongreldb::Result res = db.query(table, {range_cond});
         print_result("range [60, 90] on score", res);
 
         // 5. Primary-key lookup: id == 4 (Dave).
@@ -106,12 +138,10 @@ int main() {
         pk_cond.kind = mongreldb::CondKind::Pk;
         pk_cond.int_value = 4;
 
-        res = db.query(kTable, {pk_cond});
+        res = db.query(table, {pk_cond});
         print_result("pk == 4", res);
 
-        // 6. Cleanup.
-        db.drop_table(kTable);
-        std::cout << "Dropped table " << kTable << "\n";
+        std::cout << "Dropped table " << table << "\n";
     } catch (const std::exception &e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;

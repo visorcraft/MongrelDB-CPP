@@ -303,6 +303,21 @@ void test_upsert() {
     g_client->put("cpp_upsert", {ci(1, 1), cf(2, 10.0)});
     g_client->upsert("cpp_upsert", {ci(1, 1), cf(2, 20.0)}, {cf(2, 20.0)});
     CHECK(g_client->count("cpp_upsert") == 1, "expected 1 row after upsert");
+
+    // Verify the conflict path actually wrote the updated value, not the
+    // original: query the row back by primary key and read amount.
+    mongreldb::Condition cond;
+    cond.kind = mongreldb::CondKind::Pk;
+    cond.int_value = 1;
+    auto res = g_client->query("cpp_upsert", {cond});
+    CHECK(res.rows.size() == 1, "expected 1 row from upsert pk query, got %zu", res.rows.size());
+    double amount = 0.0;
+    for (const auto &cell : res.rows[0]) {
+        if (cell.column_id == 2 && cell.value.tag() == mongreldb::Value::Tag::Double) {
+            amount = cell.value.as_double();
+        }
+    }
+    CHECK(amount == 20.0, "expected upserted amount 20.0, got %g", amount);
 }
 
 void test_query_by_pk() {
@@ -331,7 +346,9 @@ void test_query_range() {
     cond.lo = 100; cond.lo_set = true;
     cond.hi = 150; cond.hi_set = true;
     auto res = g_client->query("cpp_range", {cond}, {}, 0);
-    CHECK(res.rows.size() >= 1, "expected at least 1 row");
+    // With amounts {50, 120, 200} and range [100, 150], exactly one row
+    // (amount == 120) matches; assert the exact count rather than >= 1.
+    CHECK(res.rows.size() == 1, "expected exactly 1 row in range, got %zu", res.rows.size());
     CHECK(!res.truncated, "result should not be truncated");
 }
 
