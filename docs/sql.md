@@ -8,7 +8,8 @@ similarity. The C++ client exposes it through `sql()`.
 std::string rows = db.sql("SELECT id, amount FROM orders WHERE amount > 100");
 ```
 
-The server returns the raw result as JSON. The client hands you that body as a
+The client sends `format:"json"` with every SQL request, so the server returns
+`SELECT` results as a JSON array of rows. The client hands you that body as a
 `std::string` - parse it with your favorite JSON library, or use the
 `Value` / `Result` decoder helpers from [queries.md](queries.md) when you
 re-shape the rows yourself.

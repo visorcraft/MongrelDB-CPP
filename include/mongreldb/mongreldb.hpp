@@ -241,9 +241,9 @@ public:
                  std::int64_t limit = 0);
 
     // ── SQL ─────────────────────────────────────────────────────────────
-    // Executes a SQL statement. For DDL/DML the daemon replies with a non-JSON
-    // status body; this returns the raw body. For SELECT the daemon typically
-    // streams Arrow IPC bytes.
+    // Executes a SQL statement. The client sends `format:"json"` with every
+    // request. For DDL/DML the daemon replies with a status body; for SELECT it
+    // returns a JSON array of rows. Either way this returns the raw body.
     std::string sql(const std::string &statement);
 
     // ── Schema ──────────────────────────────────────────────────────────
