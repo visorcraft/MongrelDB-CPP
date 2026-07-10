@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <string>
 #include <sys/stat.h>
@@ -514,11 +515,13 @@ void test_exception_hierarchy() {
 void test_idempotency_key() {
     SKIP_IF_NO_DAEMON();
     fresh_table("cpp_idem", {int_col(1, "id", true)});
-    g_client->put("cpp_idem", {ci(1, 1)}, "idem-key-1");
+    // Unique key per run so prior test runs don't replay stale results.
+    std::string idem_key = "idem-key-" + std::to_string(std::time(nullptr));
+    g_client->put("cpp_idem", {ci(1, 1)}, idem_key);
     CHECK(g_client->count("cpp_idem") == 1, "expected 1 row");
     // Same key, different value: daemon replays the original result.
     try {
-        g_client->put("cpp_idem", {ci(1, 2)}, "idem-key-1");
+        g_client->put("cpp_idem", {ci(1, 2)}, idem_key);
     } catch (...) {
         // some servers may return a conflict; either way count stays 1
     }
