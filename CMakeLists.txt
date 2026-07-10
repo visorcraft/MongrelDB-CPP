@@ -38,6 +38,12 @@ if(MONGRELDB_CPP_BUILD_TESTS)
     add_executable(test_mongreldb tests/test_mongreldb.cpp)
     target_link_libraries(test_mongreldb PRIVATE mongreldb_cpp)
     add_test(NAME test_mongreldb COMMAND test_mongreldb)
+
+    # Wire-shape conformance test for create_table payloads. This is a pure
+    # unit test: it does not need a running daemon.
+    add_executable(test_wire_shape tests/test_wire_shape.cpp)
+    target_link_libraries(test_wire_shape PRIVATE mongreldb_cpp)
+    add_test(NAME test_wire_shape COMMAND test_wire_shape)
 endif()
 
 # Install rules: headers only (the library is header-only).

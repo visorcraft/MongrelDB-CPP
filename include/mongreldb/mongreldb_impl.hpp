@@ -22,11 +22,21 @@
 
 namespace mongreldb {
 
-namespace {
+// ── JSON serialization helpers ──────────────────────────────────────────
+//
+// These live in `detail` (not an anonymous namespace) so that wire-shape
+// conformance tests can call the column-serialization free function
+// directly without spinning up a daemon. The client implementation below
+// remains the only in-tree caller of every other helper here.
 
-// ── JSON serialization ──────────────────────────────────────────────────
+namespace detail {
 
-void json_escape(std::string &out, const std::string &s) {
+// All helpers in this namespace are `inline` because the implementation
+// header is included by more than one translation unit when a consumer
+// compiles the header into their own TU alongside `src/mongreldb.cpp` (see
+// the `examples/` build instructions). With `inline`, the linker dedupes
+// the copies across TUs; without it, multiple-definition errors fire.
+inline void json_escape(std::string &out, const std::string &s) {
     out.push_back('"');
     for (unsigned char c : s) {
         switch (c) {
@@ -51,7 +61,7 @@ void json_escape(std::string &out, const std::string &s) {
     out.push_back('"');
 }
 
-void json_value(std::string &out, const Value &v) {
+inline void json_value(std::string &out, const Value &v) {
     switch (v.tag()) {
         case Value::Tag::Null:   out += "null"; break;
         case Value::Tag::Bool:   out += v.as_bool() ? "true" : "false"; break;
@@ -78,7 +88,7 @@ void json_value(std::string &out, const Value &v) {
     }
 }
 
-void json_cells(std::string &out, const std::vector<Cell> &cells) {
+inline void json_cells(std::string &out, const std::vector<Cell> &cells) {
     out.push_back('[');
     for (std::size_t i = 0; i < cells.size(); ++i) {
         if (i > 0) out.push_back(',');
@@ -323,7 +333,7 @@ private:
 };
 
 // Extract a scalar field from a top-level object. Returns true on success.
-bool get_string(const std::string &body, const std::string &key,
+inline bool get_string(const std::string &body, const std::string &key,
                 std::string &out) {
     JsonParser j(body);
     if (j.peek() != '{') return false;
@@ -347,7 +357,7 @@ bool get_string(const std::string &body, const std::string &key,
     }
 }
 
-bool get_number(const std::string &body, const std::string &key, double &out) {
+inline bool get_number(const std::string &body, const std::string &key, double &out) {
     JsonParser j(body);
     if (j.peek() != '{') return false;
     j.expect('{');
@@ -371,14 +381,14 @@ bool get_number(const std::string &body, const std::string &key, double &out) {
     }
 }
 
-bool get_int(const std::string &body, const std::string &key, std::int64_t &out) {
+inline bool get_int(const std::string &body, const std::string &key, std::int64_t &out) {
     double d = 0;
     if (!get_number(body, key, d)) return false;
     out = static_cast<std::int64_t>(d);
     return true;
 }
 
-bool get_bool(const std::string &body, const std::string &key, bool &out) {
+inline bool get_bool(const std::string &body, const std::string &key, bool &out) {
     JsonParser j(body);
     if (j.peek() != '{') return false;
     j.expect('{');
@@ -405,7 +415,7 @@ bool get_bool(const std::string &body, const std::string &key, bool &out) {
 
 // ── HTTP plumbing ───────────────────────────────────────────────────────
 
-size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
+inline size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
     auto *out = static_cast<std::string *>(userdata);
     std::size_t n = size * nmemb;
     /* Cap the download: abort once the buffered body would exceed the limit so
@@ -426,7 +436,7 @@ size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
     return n;
 }
 
-std::string url_encode_segment(const std::string &seg) {
+inline std::string url_encode_segment(const std::string &seg) {
     std::string out;
     for (unsigned char c : seg) {
         /* '/' must be percent-encoded so a table name like "a/b" cannot
@@ -445,7 +455,49 @@ std::string url_encode_segment(const std::string &seg) {
     return out;
 }
 
-} // namespace
+// Serialize a Column as a single JSON object body suitable for embedding in
+// a `/kit/create_table` payload. Includes `enum_variants` when the column
+// has any variants and `default_value` when one is set; otherwise those
+// keys are omitted so the wire shape matches an old client. Exposed for the
+// wire-shape conformance test; the client implementation below is the only
+// in-tree caller.
+inline std::string serialize_column_json(const Column &col) {
+    std::string s = "{\"id\":";
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%lld",
+                  static_cast<long long>(col.id));
+    s += buf;
+    s += ",\"name\":";
+    json_escape(s, col.name);
+    s += ",\"ty\":";
+    json_escape(s, col.ty);
+    s += ",\"primary_key\":";
+    s += col.primary_key ? "true" : "false";
+    s += ",\"nullable\":";
+    s += col.nullable ? "true" : "false";
+    if (!col.enum_variants.empty()) {
+        s += ",\"enum_variants\":[";
+        for (std::size_t i = 0; i < col.enum_variants.size(); ++i) {
+            if (i > 0) s.push_back(',');
+            json_escape(s, col.enum_variants[i]);
+        }
+        s += "]";
+    }
+    if (col.default_value.has_value()) {
+        s += ",\"default_value\":";
+        json_escape(s, *col.default_value);
+    }
+    s.push_back('}');
+    return s;
+}
+
+} // namespace detail
+
+// The client implementation below is the only in-tree consumer of the JSON
+// helpers above (apart from the wire-shape test, which calls
+// serialize_column_json directly). Bringing them in here keeps the
+// pre-refactor call sites unqualified.
+using namespace detail;
 
 // ── Client implementation ────────────────────────────────────────────────
 
@@ -653,20 +705,7 @@ inline std::int64_t MongrelDBClient::create_table(const std::string &name,
     body += ",\"columns\":[";
     for (std::size_t i = 0; i < columns.size(); ++i) {
         if (i > 0) body.push_back(',');
-        body += "{\"id\":";
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%lld",
-                      static_cast<long long>(columns[i].id));
-        body += buf;
-        body += ",\"name\":";
-        json_escape(body, columns[i].name);
-        body += ",\"ty\":";
-        json_escape(body, columns[i].ty);
-        body += ",\"primary_key\":";
-        body += columns[i].primary_key ? "true" : "false";
-        body += ",\"nullable\":";
-        body += columns[i].nullable ? "true" : "false";
-        body.push_back('}');
+        body += detail::serialize_column_json(columns[i]);
     }
     body += "]}";
     std::string resp = impl_->post("/kit/create_table", body);

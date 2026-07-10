@@ -159,6 +159,15 @@ struct Column {
     std::string ty;            // "int64", "varchar", "float64", "bool", ...
     bool primary_key = false;
     bool nullable = false;
+    // Optional enum-like variant list forwarded to the engine. Empty
+    // (default) means the column is not constrained to a fixed variant set
+    // and the wire payload omits the "enum_variants" key entirely.
+    std::vector<std::string> enum_variants;
+    // Optional default-value expression for the column. Unset (default)
+    // means no default and the wire payload omits the "default_value"
+    // key entirely. The engine accepts its own default-value DSL
+    // (e.g. "42", "'hello'", "now()", "uuid()").
+    std::optional<std::string> default_value;
 };
 
 // A staged operation in a transaction.
