@@ -159,7 +159,53 @@ public:
                                 else if (h >= 'a' && h <= 'f') cp |= h - 'a' + 10;
                                 else if (h >= 'A' && h <= 'F') cp |= h - 'A' + 10;
                             }
-                            if (cp < 0x80) out.push_back(static_cast<char>(cp));
+                            // Handle UTF-16 surrogate pairs. A high surrogate
+                            // (0xD800-0xDBFF) must be followed by a low
+                            // surrogate (0xDC00-0xDFFF) in the next \uXXXX;
+                            // combine them into a codepoint above 0xFFFF.
+                            if (cp >= 0xD800 && cp <= 0xDBFF) {
+                                if (i_ + 6 <= s_.size() && s_[i_] == '\\'
+                                    && s_[i_ + 1] == 'u') {
+                                    unsigned lo = 0;
+                                    std::size_t j = i_ + 2;
+                                    bool hex_ok = true;
+                                    for (int k = 0; k < 4; ++k) {
+                                        char h = s_[j++];
+                                        lo <<= 4;
+                                        if (h >= '0' && h <= '9') lo |= h - '0';
+                                        else if (h >= 'a' && h <= 'f') lo |= h - 'a' + 10;
+                                        else if (h >= 'A' && h <= 'F') lo |= h - 'A' + 10;
+                                        else { hex_ok = false; break; }
+                                    }
+                                    if (hex_ok && lo >= 0xDC00 && lo <= 0xDFFF) {
+                                        cp = 0x10000 + ((cp - 0xD800) << 10)
+                                             + (lo - 0xDC00);
+                                        i_ = j;
+                                    } else {
+                                        cp = 0xFFFD;  // lone high surrogate
+                                    }
+                                } else {
+                                    cp = 0xFFFD;      // lone high surrogate
+                                }
+                            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                                cp = 0xFFFD;          // lone low surrogate
+                            }
+                            // UTF-8 encode the codepoint.
+                            if (cp < 0x80) {
+                                out.push_back(static_cast<char>(cp));
+                            } else if (cp < 0x800) {
+                                out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+                                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                            } else if (cp < 0x10000) {
+                                out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+                                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                            } else {
+                                out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+                                out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+                                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                            }
                         }
                         break;
                     default: out.push_back(n); break;
