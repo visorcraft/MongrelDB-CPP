@@ -24,7 +24,7 @@ int main() {
 
         // Serialize and verify wire shape
         // The column struct is serialized via the JSON encoder
-        std::string json = MongrelDBClient::columnToJson(col);
+        std::string json = mongreldb::detail::serialize_column_json(col);
         assert(json.find("\"id\":1") != std::string::npos);
         assert(json.find("\"name\":\"id\"") != std::string::npos);
         assert(json.find("\"ty\":\"int64\"") != std::string::npos);
@@ -45,7 +45,7 @@ int main() {
         col.nullable = false;
         col.enum_variants = {"active", "inactive", "pending"};
 
-        std::string json = MongrelDBClient::columnToJson(col);
+        std::string json = mongreldb::detail::serialize_column_json(col);
         assert(json.find("\"enum_variants\":[\"active\",\"inactive\",\"pending\"]") != std::string::npos);
         assert(json.find("default_value") == std::string::npos);
         printf("PASS: enum_variants wire shape\n");
@@ -61,7 +61,7 @@ int main() {
         col.nullable = true;
         col.default_value = "0.0";
 
-        std::string json = MongrelDBClient::columnToJson(col);
+        std::string json = mongreldb::detail::serialize_column_json(col);
         assert(json.find("\"default_value\":\"0.0\"") != std::string::npos);
         assert(json.find("enum_variants") == std::string::npos);
         printf("PASS: default_value wire shape\n");

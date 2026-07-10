@@ -90,6 +90,8 @@ Create `demo.cpp`:
 ```cpp
 #include <mongreldb/mongreldb.hpp>
 #include <iostream>
+#include <optional>
+#include <string>
 
 int main() {
     // 1. Connect to the daemon. Empty url falls back to http://127.0.0.1:8453.
@@ -103,18 +105,25 @@ int main() {
 
     // 3. Create a table. Each column has a stable numeric id, a name, a type,
     //    and flags. The first column is the primary key.
+    //
+    //    `status` is constrained to {"pending", "active", "closed"} via
+    //    `enum_variants`; the engine rejects any other value at commit time.
+    //    `amount` carries a `default_value` of "0.0" so a `put` that omits
+    //    the cell still produces a valid row.
     db.create_table("orders", {
         {1, "id",       "int64",   /*primary_key=*/true,  /*nullable=*/false},
-        {2, "customer", "varchar", /*primary_key=*/false, /*nullable=*/false},
-        {3, "amount",   "float64", /*primary_key=*/false, /*nullable=*/false},
+        {2, "status",   "varchar", /*primary_key=*/false, /*nullable=*/false,
+            /*enum_variants=*/{"pending", "active", "closed"}},
+        {3, "amount",   "float64", /*primary_key=*/false, /*nullable=*/false,
+            /*default_value=*/std::optional<std::string>{"0.0"}},
     });
 
     // 4. Insert rows. Cells pair column id + value.
     db.put("orders", {{1, mongreldb::Value::integer(1)},
-                      {2, mongreldb::Value::string("Alice")},
+                      {2, mongreldb::Value::string("active")},
                       {3, mongreldb::Value::floating(99.5)}});
     db.put("orders", {{1, mongreldb::Value::integer(2)},
-                      {2, mongreldb::Value::string("Bob")},
+                      {2, mongreldb::Value::string("pending")},
                       {3, mongreldb::Value::floating(150.0)}});
 
     // 5. Query with a native index condition. The range index serves this in
@@ -129,6 +138,20 @@ int main() {
     // 6. Count the rows.
     std::cout << "total rows: " << db.count("orders") << "\n"; // 2
 
+    // 7. Trying to insert a status outside the enum set throws
+    //    `ConflictException` at commit time.
+    try {
+        db.put("orders", {{1, mongreldb::Value::integer(3)},
+                          {2, mongreldb::Value::string("cancelled")},
+                          {3, mongreldb::Value::floating(0.0)}});
+    } catch (const mongreldb::ConflictException &e) {
+        std::cerr << "rejected: " << e.code() << " - " << e.what() << "\n";
+    }
+
+    // 8. Omitting the `amount` cell falls back to its default (0.0).
+    db.put("orders", {{1, mongreldb::Value::integer(4)},
+                      {2, mongreldb::Value::string("active")}});
+
     return 0;
 }
 ```
@@ -140,7 +163,7 @@ c++ -std=c++17 -IMongrelDB-CPP/include demo.cpp $(pkg-config --cflags --libs lib
 ./demo
 ```
 
-You should see the row count of 2.
+You should see the row count of 2 plus the rejected-write log line.
 
 ## 5. What each part does
 
@@ -148,8 +171,8 @@ You should see the row count of 2.
 |------|--------------|
 | `MongrelDBClient db` | Builds an HTTP client targeting one daemon. RAII; cleans up in the destructor. |
 | `db.health()` | GET `/health`; returns `true` when the daemon answers. Always check before real work. |
-| `db.create_table(name, cols)` | POST `/kit/create_table`. Column `id`s are the on-wire identifiers; use them everywhere else. |
-| `db.put(table, cells)` | Single-op transaction: POST `/kit/txn` with one `put` op. `cells` is flattened to `[col_id, val, ...]`. |
+| `db.create_table(name, cols)` | POST `/kit/create_table`. Column `id`s are the on-wire identifiers; use them everywhere else. Per-column `enum_variants` and `default_value` constrain writes server-side. |
+| `db.put(table, cells)` | Single-op transaction: POST `/kit/txn` with one `put` op. `cells` is flattened to `[col_id, val, ...]`. Cells omitted from a write fall back to the column's `default_value`. |
 | `db.query(...)` | Builds a `/kit/query` body. Conditions push down to native indexes. |
 | `{1, 2}` projection | Server returns only those column ids, saving bandwidth. |
 | `limit = 100` | Caps the result; check `res.truncated` afterward to detect overflow. |
@@ -185,3 +208,5 @@ construct with the token or `BasicAuth` overload. See [auth.md](auth.md).
 - [sql.md](sql.md) - recursive CTEs, window functions, `CREATE TABLE AS SELECT`
 - [auth.md](auth.md) - bearer tokens, basic auth, user/role management
 - [errors.md](errors.md) - the exception hierarchy and recovery patterns
+- `examples/column_constraints.cpp` - a runnable demo of `enum_variants`
+  and `default_value`, including the rejection path.

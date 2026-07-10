@@ -35,7 +35,7 @@
 - **Query builder** that pushes conditions down to the engine's specialized indexes for sub-millisecond lookups: bitmap equality, learned-range, null checks, and FM-index full-text search. Conditions are AND-ed.
 - **Idempotent batch transactions** - all operations staged locally and committed atomically, with the engine enforcing unique, foreign key, and check constraints at commit time. Idempotency keys return the original response on duplicate commits, even after a crash.
 - **Full SQL access** through the DataFusion-backed `/sql` endpoint: recursive CTEs, window functions, `CREATE TABLE AS SELECT`, materialized views, and multi-statement execution.
-- **Schema management**: typed table creation, full schema catalog, and per-table descriptors.
+- **Schema management**: typed table creation with optional `enum_variants` and `default_value` per column, full schema catalog, and per-table descriptors.
 - **RAII and move semantics**: the client owns its libcurl state; destructor cleans up. Not copyable, movable.
 - **Bundled C ABI header** (`mongreldb/mongreldb_engine.h`) - a copy of the engine's native interface, for users who want to embed the engine directly rather than talk HTTP.
 - **Exception hierarchy**: `MongrelDBException` (base), `AuthException` (401/403), `NotFoundException` (404), `ConflictException` (409, with structured code and op index), `QueryException` (everything else).
@@ -51,6 +51,7 @@ Runnable, commented examples live in the docs:
 - [SQL](docs/sql.md) - recursive CTEs, window functions, advanced SQL.
 - [Authentication](docs/auth.md) - bearer token, HTTP Basic, and open modes.
 - [Errors](docs/errors.md) - the exception hierarchy and recovery patterns.
+- `examples/column_constraints.cpp` - `enum_variants` and `default_value` columns.
 
 ## Quick Example
 
@@ -164,6 +165,35 @@ if (res.truncated) {
 }
 ```
 
+## Column constraints: enums and defaults
+
+Each `mongreldb::Column` carries two optional fields that the engine
+enforces at commit time:
+
+- `enum_variants` (`std::vector<std::string>`) - restricts a varchar column to
+  a fixed variant set. The engine rejects writes outside the set.
+- `default_value` (`std::optional<std::string>`) - a default-value
+  expression the engine substitutes when a `put` omits the column. The
+  expression follows the engine's default-value DSL (`"42"`, `"'hello'"`,
+  `"now()"`, `"uuid()"`).
+
+Both fields are omitted from the wire payload when unset, so older servers
+that don't recognise them still accept the request.
+
+```cpp
+db.create_table("orders", {
+    {1, "id",      "int64",   /*primary_key=*/true,  /*nullable=*/false},
+    {2, "status",  "varchar", /*primary_key=*/false, /*nullable=*/false,
+        /*enum_variants=*/{"pending", "active", "closed"}},
+    {3, "amount",  "float64", /*primary_key=*/false, /*nullable=*/true,
+        /*default_value=*/std::optional<std::string>{"0.0"}},
+});
+```
+
+Trying to insert `"cancelled"` into `status` throws a `ConflictException` at
+commit time. A `put` that omits the `amount` cell writes the default `0.0`
+instead.
+
 ## SQL
 
 ```cpp
@@ -227,7 +257,7 @@ try {
 | `set_timeout(seconds)` | Per-request timeout (default 30) |
 | `health()` | Check daemon health (returns `bool`) |
 | `table_names()` | List table names (`vector<string>`) |
-| `create_table(name, columns)` | Create a table (returns table id) |
+| `create_table(name, columns)` | Create a table (returns table id); each `Column` may set `enum_variants` and `default_value` |
 | `drop_table(name)` | Drop a table |
 | `count(table)` | Row count |
 | `put(table, cells, key)` | Insert a row |
@@ -239,6 +269,18 @@ try {
 | `sql(statement)` | Execute SQL (returns raw body) |
 | `schema()` | Full schema catalog (raw JSON) |
 | `schema_for(table)` | Single-table descriptor (raw JSON) |
+
+### Column
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `id` | `int64` | Stable on-wire column identifier. |
+| `name` | `string` | Human-readable name (not used on the wire). |
+| `ty` | `string` | Engine type tag: `int64`, `float64`, `varchar`, `bool`, ... |
+| `primary_key` | `bool` | Marks the primary key column. |
+| `nullable` | `bool` | Allows NULL cells. |
+| `enum_variants` | `vector<string>` | Optional. Restricts a varchar column to these values; omitted from the wire payload when empty. |
+| `default_value` | `optional<string>` | Optional. Engine default-value DSL expression applied when a `put` omits the column; omitted when unset. |
 
 ### Exception hierarchy
 
