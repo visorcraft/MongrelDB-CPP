@@ -190,6 +190,13 @@ db.create_table("orders", {
 });
 ```
 
+Table CHECKs use the additive raw constraints overload:
+
+```cpp
+db.create_table("orders", columns,
+    R"({"checks":[{"id":1,"name":"amount_nonneg","expr":{"Ge":[{"Col":3},{"Lit":{"Float64":0.0}}]}}]})");
+```
+
 Trying to insert `"cancelled"` into `status` throws a `ConflictException` at
 commit time. A `put` that omits the `amount` cell writes the default `0.0`
 instead.
@@ -258,6 +265,7 @@ try {
 | `health()` | Check daemon health (returns `bool`) |
 | `table_names()` | List table names (`vector<string>`) |
 | `create_table(name, columns)` | Create a table (returns table id); each `Column` may set `enum_variants` and `default_value` |
+| `create_table(name, columns, constraints_json)` | Create a table with native `constraints` JSON (including CHECKs) |
 | `drop_table(name)` | Drop a table |
 | `count(table)` | Row count |
 | `put(table, cells, key)` | Insert a row |

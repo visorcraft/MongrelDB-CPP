@@ -67,6 +67,18 @@ int main() {
         printf("PASS: default_value wire shape\n");
     }
 
+    // Test 4: top-level CHECK constraints.
+    {
+        Column col{1, "score", "int64", false, false, {}, std::nullopt};
+        std::string constraints =
+            R"({"checks":[{"id":1,"name":"score_nonneg","expr":{"Ge":[{"Col":1},{"Lit":{"Int64":0}}]}}]})";
+        std::string json = mongreldb::detail::serialize_create_table_json(
+            "scores", {col}, constraints);
+        assert(json.find("\"constraints\":{\"checks\":[") != std::string::npos);
+        assert(json.find("\"name\":\"score_nonneg\"") != std::string::npos);
+        printf("PASS: CHECK constraints wire shape\n");
+    }
+
     printf("All wire-shape tests passed.\n");
     return 0;
 }

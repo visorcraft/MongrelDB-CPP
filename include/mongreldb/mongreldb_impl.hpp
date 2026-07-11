@@ -491,6 +491,25 @@ inline std::string serialize_column_json(const Column &col) {
     return s;
 }
 
+inline std::string serialize_create_table_json(
+        const std::string &name, const std::vector<Column> &columns,
+        const std::string &constraints_json = "") {
+    std::string body = "{\"name\":";
+    json_escape(body, name);
+    body += ",\"columns\":[";
+    for (std::size_t i = 0; i < columns.size(); ++i) {
+        if (i > 0) body.push_back(',');
+        body += serialize_column_json(columns[i]);
+    }
+    body.push_back(']');
+    if (!constraints_json.empty()) {
+        body += ",\"constraints\":";
+        body += constraints_json;
+    }
+    body.push_back('}');
+    return body;
+}
+
 } // namespace detail
 
 // The client implementation below is the only in-tree consumer of the JSON
@@ -700,14 +719,14 @@ inline std::vector<std::string> MongrelDBClient::table_names() {
 
 inline std::int64_t MongrelDBClient::create_table(const std::string &name,
                                            const std::vector<Column> &columns) {
-    std::string body = "{\"name\":";
-    json_escape(body, name);
-    body += ",\"columns\":[";
-    for (std::size_t i = 0; i < columns.size(); ++i) {
-        if (i > 0) body.push_back(',');
-        body += detail::serialize_column_json(columns[i]);
-    }
-    body += "]}";
+    return create_table(name, columns, "");
+}
+
+inline std::int64_t MongrelDBClient::create_table(
+        const std::string &name, const std::vector<Column> &columns,
+        const std::string &constraints_json) {
+    std::string body = detail::serialize_create_table_json(
+        name, columns, constraints_json);
     std::string resp = impl_->post("/kit/create_table", body);
     std::int64_t tid = 0;
     get_int(resp, "table_id", tid);

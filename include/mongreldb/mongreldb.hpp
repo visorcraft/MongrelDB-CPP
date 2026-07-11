@@ -227,6 +227,9 @@ public:
     std::vector<std::string> table_names();
     std::int64_t create_table(const std::string &name,
                               const std::vector<Column> &columns);
+    std::int64_t create_table(const std::string &name,
+                              const std::vector<Column> &columns,
+                              const std::string &constraints_json);
     void drop_table(const std::string &name);
     std::int64_t count(const std::string &table);
 
