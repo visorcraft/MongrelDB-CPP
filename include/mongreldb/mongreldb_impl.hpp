@@ -750,6 +750,14 @@ inline HistoryRetention MongrelDBClient::set_history_retention_epochs(std::uint6
         "{\"history_retention_epochs\":" + std::to_string(epochs) + "}"));
 }
 
+inline std::uint64_t MongrelDBClient::history_retention_epochs() {
+    return history_retention().history_retention_epochs;
+}
+
+inline std::uint64_t MongrelDBClient::earliest_retained_epoch() {
+    return history_retention().earliest_retained_epoch;
+}
+
 inline std::int64_t MongrelDBClient::create_table(
         const std::string &name, const std::vector<Column> &columns,
         const std::string &constraints_json) {

@@ -6,11 +6,217 @@
 // Licensing: MIT OR Apache-2.0.
 
 #include <mongreldb/mongreldb.hpp>
+
 #include <cassert>
+#include <cerrno>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <atomic>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
+
+#ifdef __linux__
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 using namespace mongreldb;
+
+namespace {
+
+// ── Tiny single-threaded HTTP server for transport tests ─────────────────
+//
+// Accepts a fixed number of keep-alive-less connections, captures the
+// request line / body, and replies with a pre-canned response.  This lets
+// wire-shape tests assert the exact method, path, and body the client
+// sends without depending on a real mongreldb-server daemon.
+
+struct CapturedRequest {
+    std::string method;
+    std::string path;
+    std::string body;
+};
+
+class MiniHttpServer {
+public:
+    bool start() {
+#ifdef __linux__
+        listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd_ < 0) return false;
+
+        int yes = 1;
+        if (setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) != 0) {
+            close(listen_fd_);
+            listen_fd_ = -1;
+            return false;
+        }
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        if (bind(listen_fd_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) != 0) {
+            close(listen_fd_);
+            listen_fd_ = -1;
+            return false;
+        }
+
+        socklen_t len = sizeof(addr);
+        if (getsockname(listen_fd_, reinterpret_cast<struct sockaddr *>(&addr), &len) != 0) {
+            close(listen_fd_);
+            listen_fd_ = -1;
+            return false;
+        }
+        port_ = ntohs(addr.sin_port);
+
+        if (listen(listen_fd_, 8) != 0) {
+            close(listen_fd_);
+            listen_fd_ = -1;
+            return false;
+        }
+
+        thread_ = std::thread([this]() { run(); });
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    void stop() {
+#ifdef __linux__
+        stop_ = true;
+        if (listen_fd_ >= 0) {
+            shutdown(listen_fd_, SHUT_RDWR);
+            close(listen_fd_);
+            listen_fd_ = -1;
+        }
+        if (thread_.joinable()) thread_.join();
+#endif
+    }
+
+    int port() const { return port_; }
+
+    std::vector<CapturedRequest> take_requests() {
+        std::lock_guard<std::mutex> lock(mu_);
+        return std::move(requests_);
+    }
+
+    void set_response(int status, const std::string &body) {
+        std::lock_guard<std::mutex> lock(mu_);
+        response_status_ = status;
+        response_body_ = body;
+    }
+
+private:
+#ifdef __linux__
+    void run() {
+        while (!stop_) {
+            struct sockaddr_in client{};
+            socklen_t len = sizeof(client);
+            int fd = accept(listen_fd_, reinterpret_cast<struct sockaddr *>(&client), &len);
+            if (fd < 0) break;
+            handle(fd);
+            close(fd);
+        }
+    }
+
+    void handle(int fd) {
+        std::string buf;
+        char tmp[4096];
+        for (;;) {
+            ssize_t n = recv(fd, tmp, sizeof(tmp), 0);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (n == 0) break;
+            buf.append(tmp, static_cast<std::size_t>(n));
+            // HTTP request bodies used here are tiny; stop reading once we
+            // have seen the header terminator.
+            if (buf.find("\r\n\r\n") != std::string::npos) break;
+        }
+
+        CapturedRequest req;
+        std::size_t line_end = buf.find("\r\n");
+        if (line_end != std::string::npos) {
+            std::string line = buf.substr(0, line_end);
+            std::size_t first = line.find(' ');
+            std::size_t second = line.find(' ', first + 1);
+            if (first != std::string::npos && second != std::string::npos) {
+                req.method = line.substr(0, first);
+                req.path = line.substr(first + 1, second - first - 1);
+            }
+        }
+
+        std::size_t body_start = buf.find("\r\n\r\n");
+        if (body_start != std::string::npos) {
+            std::size_t content_length = 0;
+            std::size_t cl = buf.find("Content-Length:");
+            if (cl != std::string::npos && cl < body_start) {
+                std::size_t num_start = buf.find_first_of("0123456789", cl + 15);
+                std::size_t num_end = buf.find_first_not_of("0123456789", num_start);
+                if (num_start != std::string::npos && num_start < body_start) {
+                    content_length = static_cast<std::size_t>(
+                        std::strtoull(buf.substr(num_start, num_end - num_start).c_str(), nullptr, 10));
+                }
+            }
+            std::size_t needed = body_start + 4 + content_length;
+            while (buf.size() < needed) {
+                ssize_t n = recv(fd, tmp, sizeof(tmp), 0);
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+                if (n == 0) break;
+                buf.append(tmp, static_cast<std::size_t>(n));
+            }
+            req.body = buf.substr(body_start + 4, content_length);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            requests_.push_back(std::move(req));
+        }
+
+        std::string response;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            response = "HTTP/1.1 " + std::to_string(response_status_) + " OK\r\n";
+            response += "Content-Type: application/json\r\n";
+            response += "Content-Length: " + std::to_string(response_body_.size()) + "\r\n";
+            response += "Connection: close\r\n\r\n";
+            response += response_body_;
+        }
+        send(fd, response.c_str(), response.size(), MSG_NOSIGNAL);
+    }
+#endif
+
+    int listen_fd_ = -1;
+    int port_ = 0;
+    std::thread thread_;
+    std::atomic<bool> stop_{false};
+    std::mutex mu_;
+    std::vector<CapturedRequest> requests_;
+    int response_status_ = 200;
+    std::string response_body_ = "{}";
+};
+
+} // namespace
+
+#define WS_FAIL(msg)                                                            \
+    do {                                                                        \
+        std::printf("FAIL: %s\n", msg);                                          \
+        return 1;                                                               \
+    } while (0)
+#define WS_CHECK(cond, msg)                                                     \
+    do {                                                                        \
+        if (!(cond)) WS_FAIL(msg);                                              \
+    } while (0)
 
 int main() {
     // Test 1: Basic column (no optional fields)
@@ -35,40 +241,110 @@ int main() {
         printf("PASS: basic column wire shape\n");
     }
 
-    for (const auto &value : {std::string{"\"text\""}, std::string{"true"},
-                              std::string{"null"}, std::string{"\"now\""}}) {
-        Column col;
-        col.default_value_json = value;
-        const auto json = mongreldb::detail::serialize_column_json(col);
-        assert(json.find("\"default_value\":" + value) != std::string::npos);
-        assert(json.find("default_expr") == std::string::npos);
-    }
-
+    // Test 2: Static-default matrix in a single create-table payload.
+    // Covers string, number, boolean, explicit null, literal "now", and
+    // default_expr "now".  Each shape must round-trip through the hand-rolled
+    // serializer without being re-quoted or mangled.
     {
-        Column col;
-        col.id = 4;
-        col.name = "attempts";
-        col.ty = "int64";
-        col.default_value_json = "3";
-        const std::string json = mongreldb::detail::serialize_column_json(col);
-        assert(json.find("\"default_value\":3") != std::string::npos);
-        assert(json.find("default_expr") == std::string::npos);
+        auto make_col = [](std::int64_t id, const std::string &name,
+                           const std::string &ty) {
+            Column c;
+            c.id = id;
+            c.name = name;
+            c.ty = ty;
+            c.primary_key = false;
+            c.nullable = true;
+            return c;
+        };
+
+        Column c_str = make_col(1, "label", "varchar");
+        c_str.default_value_json = "\"text\"";
+
+        Column c_num = make_col(2, "attempts", "int64");
+        c_num.default_value_json = "3";
+
+        Column c_bool = make_col(3, "active", "bool");
+        c_bool.default_value_json = "true";
+
+        Column c_null = make_col(4, "optional", "varchar");
+        c_null.default_value_json = "null";
+
+        Column c_now_literal = make_col(5, "created_at", "timestamp_nanos");
+        c_now_literal.default_value_json = "\"now\"";
+
+        Column c_expr = make_col(6, "updated_at", "timestamp_nanos");
+        c_expr.default_expr = "now";
+
+        std::string json = mongreldb::detail::serialize_create_table_json(
+            "defaults", {c_str, c_num, c_bool, c_null, c_now_literal, c_expr});
+
+        WS_CHECK(json.find("\"default_value\":\"text\"") != std::string::npos,
+                 "string default not encoded as JSON string");
+        WS_CHECK(json.find("\"default_value\":3") != std::string::npos,
+                 "numeric default not encoded as JSON number");
+        WS_CHECK(json.find("\"default_value\":true") != std::string::npos,
+                 "boolean default not encoded as JSON true");
+        WS_CHECK(json.find("\"default_value\":null") != std::string::npos,
+                 "explicit null default not encoded as JSON null");
+        WS_CHECK(json.find("\"default_value\":\"now\"") != std::string::npos,
+                 "literal now default not encoded as JSON string");
+        WS_CHECK(json.find("\"default_expr\":\"now\"") != std::string::npos,
+                 "default_expr now missing");
+        printf("PASS: static-default matrix wire shape\n");
     }
 
+    // Test 3: /history/retention transport contract.
+    // Asserts exact HTTP method, path, request body key, and response-key
+    // parsing for both getter methods.
     {
-        Column col;
-        col.id = 5;
-        col.name = "created_at";
-        col.ty = "timestamp_nanos";
-        col.default_value = "legacy";
-        col.default_value_json = "3";
-        col.default_expr = "now";
-        const std::string json = mongreldb::detail::serialize_column_json(col);
-        assert(json.find("\"default_expr\":\"now\"") != std::string::npos);
-        assert(json.find("default_value") == std::string::npos);
+        MiniHttpServer server;
+        if (!server.start()) {
+            printf("SKIP: /history/retention transport test (no socket support)\n");
+        } else {
+            // The mock replies with a body that lets us verify both response
+            // keys are parsed by the PUT and the two GET methods.
+            server.set_response(200,
+                "{\"history_retention_epochs\":42,\"earliest_retained_epoch\":1}");
+            std::string url = "http://127.0.0.1:" + std::to_string(server.port());
+            MongrelDBClient client(url);
+
+            auto put_resp = client.set_history_retention_epochs(42);
+            WS_CHECK(put_resp.history_retention_epochs == 42,
+                     "PUT response history_retention_epochs mismatch");
+            WS_CHECK(put_resp.earliest_retained_epoch == 1,
+                     "PUT response earliest_retained_epoch mismatch");
+
+            std::uint64_t epochs = client.history_retention_epochs();
+            WS_CHECK(epochs == 42, "GET history_retention_epochs mismatch");
+
+            std::uint64_t earliest = client.earliest_retained_epoch();
+            WS_CHECK(earliest == 1, "GET earliest_retained_epoch mismatch");
+
+            auto reqs = server.take_requests();
+            WS_CHECK(reqs.size() == 3, "expected 3 captured requests");
+
+            WS_CHECK(reqs[0].method == "PUT", "expected PUT method");
+            WS_CHECK(reqs[0].path == "/history/retention", "expected /history/retention path");
+            WS_CHECK(reqs[0].body.find("\"history_retention_epochs\":42") !=
+                     std::string::npos,
+                     "PUT body missing history_retention_epochs key");
+
+            WS_CHECK(reqs[1].method == "GET", "expected first GET method");
+            WS_CHECK(reqs[1].path == "/history/retention",
+                     "expected first GET /history/retention path");
+            WS_CHECK(reqs[1].body.empty(), "GET body should be empty");
+
+            WS_CHECK(reqs[2].method == "GET", "expected second GET method");
+            WS_CHECK(reqs[2].path == "/history/retention",
+                     "expected second GET /history/retention path");
+            WS_CHECK(reqs[2].body.empty(), "GET body should be empty");
+
+            server.stop();
+            printf("PASS: /history/retention transport contract\n");
+        }
     }
 
-    // Test 2: Column with enum_variants
+    // Test 4: Column with enum_variants
     {
         Column col;
         col.id = 2;
@@ -84,7 +360,7 @@ int main() {
         printf("PASS: enum_variants wire shape\n");
     }
 
-    // Test 3: Column with default_value
+    // Test 5: Column with default_value
     {
         Column col;
         col.id = 3;
@@ -100,7 +376,7 @@ int main() {
         printf("PASS: default_value wire shape\n");
     }
 
-    // Test 4: top-level CHECK constraints.
+    // Test 6: top-level CHECK constraints.
     {
         Column col{1, "score", "int64", false, false, {}, std::nullopt,
                    std::nullopt, std::nullopt};

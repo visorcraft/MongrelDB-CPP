@@ -22,8 +22,26 @@
 |---|---|---|
 | C++ client | `MongrelDB-CPP` | header-only; build from source with CMake + libcurl |
 
-History retention: `history_retention()` and
-`set_history_retention_epochs(n)`.
+## History retention (MVCC)
+
+The daemon keeps a rolling window of prior commit epochs. You can inspect and
+configure that window through the client:
+
+```cpp
+// Current configuration
+std::uint64_t epochs   = db.history_retention_epochs();
+std::uint64_t earliest = db.earliest_retained_epoch();
+
+// Resize the window.  Requires ADMIN permission on an auth-enabled daemon.
+auto cfg = db.set_history_retention_epochs(1024);
+```
+
+- **Admin-only:** on a daemon started with `--auth-token` or `--auth-users`,
+  the caller must be an admin user.  In open mode the call is allowed without
+  credentials.
+- **Cannot restore lost history:** the first time you enable retention it
+  starts at the *current* epoch, and increasing the window later cannot recreate
+  epochs that were already discarded by compaction or a smaller prior window.
 
 ## Requirements
 
@@ -189,8 +207,16 @@ db.create_table("orders", {
         /*enum_variants=*/{"pending", "active", "closed"}},
     {3, "amount",  "float64", /*primary_key=*/false, /*nullable=*/true,
         /*default_value=*/std::optional<std::string>{"0.0"}},
+    {4, "label",   "varchar", /*primary_key=*/false, /*nullable=*/true,
+        /*default_value_json=*/std::optional<std::string>{"\"none\""}},
+    {5, "created", "timestamp_nanos", /*primary_key=*/false, /*nullable=*/false,
+        /*default_expr=*/std::optional<std::string>{"now"}},
 });
 ```
+
+`default_value_json` is sent verbatim, so string literals must be quoted on
+the client side (`"\"none\""`).  `default_expr: "now"` asks the engine to
+insert the current timestamp on every omitted write.
 
 Table CHECKs use the additive raw constraints overload:
 
@@ -266,7 +292,11 @@ try {
 | `set_timeout(seconds)` | Per-request timeout (default 30) |
 | `health()` | Check daemon health (returns `bool`) |
 | `table_names()` | List table names (`vector<string>`) |
-| `create_table(name, columns)` | Create a table (returns table id); each `Column` may set `enum_variants` and `default_value` |
+| `history_retention()` | Full retention response (`HistoryRetention`) |
+| `history_retention_epochs()` | Configured MVCC window size (`uint64_t`) |
+| `earliest_retained_epoch()` | Oldest epoch currently retained (`uint64_t`) |
+| `set_history_retention_epochs(n)` | Resize the MVCC window; returns `HistoryRetention` |
+| `create_table(name, columns)` | Create a table (returns table id); each `Column` may set `enum_variants`, `default_value`, `default_value_json`, or `default_expr` |
 | `create_table(name, columns, constraints_json)` | Create a table with native `constraints` JSON (including CHECKs) |
 | `drop_table(name)` | Drop a table |
 | `count(table)` | Row count |
@@ -290,7 +320,9 @@ try {
 | `primary_key` | `bool` | Marks the primary key column. |
 | `nullable` | `bool` | Allows NULL cells. |
 | `enum_variants` | `vector<string>` | Optional. Restricts a varchar column to these values; omitted from the wire payload when empty. |
-| `default_value` | `optional<string>` | Optional. Engine default-value DSL expression applied when a `put` omits the column; omitted when unset. |
+| `default_value` | `optional<string>` | Optional. Legacy string default-value DSL expression; omitted when unset. |
+| `default_value_json` | `optional<string>` | Optional. Raw JSON scalar sent verbatim as `default_value`; omitted when unset. |
+| `default_expr` | `optional<string>` | Optional. Dynamic default (`"now"`, `"uuid"`); takes precedence and is omitted when unset. |
 
 ### Exception hierarchy
 

@@ -178,7 +178,48 @@ You should see the row count of 2 plus the rejected-write log line.
 | `limit = 100` | Caps the result; check `res.truncated` afterward to detect overflow. |
 | `db.count(table)` | GET `/tables/{name}/count`. |
 
-## 6. Common pitfalls
+## 6. History retention and typed defaults
+
+MongrelDB keeps a rolling MVCC history window. You can resize it and inspect
+its bounds from the C++ client:
+
+```cpp
+// Requires ADMIN permission when the daemon runs with auth enabled.
+auto cfg = db.set_history_retention_epochs(1024);
+std::cout << "retention: " << db.history_retention_epochs() << " epochs\n";
+std::cout << "earliest retained: " << db.earliest_retained_epoch() << "\n";
+
+// Read an older version of a row via SQL:
+// SELECT value FROM orders AS OF EPOCH <epoch> WHERE id = 1;
+```
+
+**Cannot restore discarded history.** The first time retention is enabled the
+window starts at the *current* epoch; earlier versions may already have been
+compacted. Increasing the window later cannot recreate epochs that fell outside
+the previous guarantee.
+
+For typed column defaults, use `default_value_json` for raw JSON scalars or
+`default_expr` for dynamic values such as `"now"`:
+
+```cpp
+db.create_table("orders", {
+    {1, "id",      "int64",   /*primary_key=*/true,  /*nullable=*/false},
+    {2, "status",  "varchar", /*primary_key=*/false, /*nullable=*/false,
+        /*enum_variants=*/{"pending", "active", "closed"}},
+    {3, "amount",  "float64", /*primary_key=*/false, /*nullable=*/true,
+        /*default_value=*/std::optional<std::string>{"0.0"}},
+    {4, "label",   "varchar", /*primary_key=*/false, /*nullable=*/true,
+        /*default_value_json=*/std::optional<std::string>{"\"none\""}},
+    {5, "created", "timestamp_nanos", /*primary_key=*/false, /*nullable=*/false,
+        /*default_expr=*/std::optional<std::string>{"now"}},
+});
+```
+
+`default_value_json` is sent verbatim, so string literals must include their
+JSON quotes (`"\"none\""`).  `default_expr: "now"` tells the engine to fill
+in the current timestamp when the column is omitted from a write.
+
+## 7. Common pitfalls
 
 **Using the column name instead of the column id.** Every on-wire API uses the
 numeric `id` from `create_table`, never the `name`. Conditions take the int64

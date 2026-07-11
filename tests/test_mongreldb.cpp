@@ -21,6 +21,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -292,6 +293,20 @@ std::int64_t cell_int64(const mongreldb::Row &row, std::int64_t col_id,
     return 0;
 }
 
+// Extract the first signed integer that appears in a JSON body.  Works for
+// both array-of-arrays (`[[42]]`) and object-array (`[{"x":42}]`) JSON
+// responses from the daemon's SQL endpoint.
+std::int64_t extract_first_int(const std::string &s) {
+    std::size_t i = 0;
+    while (i < s.size()) {
+        char c = s[i];
+        if ((c >= '0' && c <= '9') || c == '-') break;
+        ++i;
+    }
+    if (i >= s.size()) return 0;
+    return std::strtoll(s.c_str() + i, nullptr, 10);
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 void test_health() {
@@ -528,6 +543,45 @@ void test_idempotency_key() {
     CHECK(g_client->count("cpp_idem") == 1, "expected 1 row after duplicate idempotent commit");
 }
 
+void test_history_retention() {
+    SKIP_IF_NO_DAEMON();
+
+    // Configure a durable MVCC window before writing any history.
+    auto cfg = g_client->set_history_retention_epochs(100);
+    CHECK(cfg.history_retention_epochs == 100, "expected retention 100");
+    CHECK(g_client->history_retention_epochs() == 100,
+          "history_retention_epochs getter mismatch");
+    std::uint64_t earliest = g_client->earliest_retained_epoch();
+    CHECK(earliest <= cfg.earliest_retained_epoch,
+          "earliest_retained_epoch moved backwards");
+
+    fresh_table("cpp_retention", {int_col(1, "id", true), int_col(2, "value", false)});
+    g_client->put("cpp_retention", {ci(1, 1), ci(2, 10)});
+
+    // Capture the commit epoch of the insert via PRAGMA data_version.
+    std::string epoch_body = g_client->sql("PRAGMA data_version");
+    std::int64_t insert_epoch = extract_first_int(epoch_body);
+    CHECK(insert_epoch > 0, "expected positive insert epoch, got %lld",
+          static_cast<long long>(insert_epoch));
+
+    // Update the same row; this advances the current epoch.
+    g_client->upsert("cpp_retention", {ci(1, 1), ci(2, 20)}, {ci(2, 20)});
+
+    // At the current epoch the value is 20.
+    std::string now_body = g_client->sql("SELECT value FROM cpp_retention WHERE id = 1");
+    std::int64_t now_val = extract_first_int(now_body);
+    CHECK(now_val == 20, "expected current value 20, got %lld",
+          static_cast<long long>(now_val));
+
+    // AS OF the insert epoch the older version must still be readable.
+    std::string old_sql = "SELECT value FROM cpp_retention AS OF EPOCH " +
+                          std::to_string(insert_epoch) + " WHERE id = 1";
+    std::string old_body = g_client->sql(old_sql);
+    std::int64_t old_val = extract_first_int(old_body);
+    CHECK(old_val == 10, "expected AS-OF value 10, got %lld",
+          static_cast<long long>(old_val));
+}
+
 } // namespace
 
 int main() {
@@ -548,6 +602,7 @@ int main() {
     RUN(test_error_not_found);
     RUN(test_exception_hierarchy);
     RUN(test_idempotency_key);
+    RUN(test_history_retention);
 
     teardown_daemon();
 
