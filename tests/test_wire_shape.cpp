@@ -16,6 +16,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #ifdef __linux__
@@ -206,6 +207,63 @@ private:
     std::string response_body_ = "{}";
 };
 
+// Parsed defaults for one column in a create_table wire-shape test.
+struct ColumnWireDefaults {
+    bool has_default_value = false;
+    Value default_value;
+    bool has_default_expr = false;
+    std::string default_expr;
+};
+
+// Decode a create_table JSON body and return a map of column name to its
+// default_value/default_expr state.  This lets wire-shape tests inspect the
+// actual parsed JSON instead of relying on fragile substring matches.
+static std::unordered_map<std::string, ColumnWireDefaults>
+extract_column_defaults(const std::string &json) {
+    std::unordered_map<std::string, ColumnWireDefaults> result;
+    mongreldb::detail::JsonParser j(json);
+    if (j.peek() != '{') return result;
+    j.expect('{');
+    for (;;) {
+        if (j.peek() != '"') break;
+        std::string key = j.read_string_raw();
+        j.expect(':');
+        if (key == "columns" && j.peek() == '[') {
+            j.expect('[');
+            while (j.peek() == '{') {
+                j.expect('{');
+                ColumnWireDefaults defs;
+                std::string name;
+                while (j.peek() == '"') {
+                    std::string col_key = j.read_string_raw();
+                    j.expect(':');
+                    if (col_key == "name" && j.peek() == '"') {
+                        name = j.read_string_raw();
+                    } else if (col_key == "default_value") {
+                        defs.has_default_value = true;
+                        defs.default_value = j.read_value();
+                    } else if (col_key == "default_expr" && j.peek() == '"') {
+                        defs.has_default_expr = true;
+                        defs.default_expr = j.read_string_raw();
+                    } else {
+                        j.skip_value();
+                    }
+                    if (j.peek() == ',') j.expect(',');
+                }
+                j.expect('}');
+                if (!name.empty()) result[name] = defs;
+                if (j.peek() == ',') j.expect(',');
+            }
+            j.expect(']');
+            break;
+        }
+        j.skip_value();
+        if (j.peek() == ',') j.expect(',');
+        else break;
+    }
+    return result;
+}
+
 } // namespace
 
 #define WS_FAIL(msg)                                                            \
@@ -242,9 +300,11 @@ int main() {
     }
 
     // Test 2: Static-default matrix in a single create-table payload.
-    // Covers string, number, boolean, explicit null, literal "now", and
-    // default_expr "now".  Each shape must round-trip through the hand-rolled
-    // serializer without being re-quoted or mangled.
+    // Covers string, number, boolean, explicit null, literal "now",
+    // default_expr "now", and the precedence rule (default_expr wins when both
+    // are set).  Each shape must round-trip through the hand-rolled serializer
+    // without being re-quoted or mangled.  We decode the JSON and inspect the
+    // parsed values rather than doing fragile substring searches.
     {
         auto make_col = [](std::int64_t id, const std::string &name,
                            const std::string &ty) {
@@ -275,21 +335,59 @@ int main() {
         Column c_expr = make_col(6, "updated_at", "timestamp_nanos");
         c_expr.default_expr = "now";
 
-        std::string json = mongreldb::detail::serialize_create_table_json(
-            "defaults", {c_str, c_num, c_bool, c_null, c_now_literal, c_expr});
+        Column c_both = make_col(7, "both", "timestamp_nanos");
+        c_both.default_value_json = "\"ignored\"";
+        c_both.default_expr = "now";
 
-        WS_CHECK(json.find("\"default_value\":\"text\"") != std::string::npos,
+        std::string json = mongreldb::detail::serialize_create_table_json(
+            "defaults", {c_str, c_num, c_bool, c_null, c_now_literal, c_expr, c_both});
+
+        auto defs = extract_column_defaults(json);
+
+        const ColumnWireDefaults &str_def = defs["label"];
+        WS_CHECK(str_def.has_default_value && !str_def.has_default_expr,
+                 "string default should only set default_value");
+        WS_CHECK(str_def.default_value.tag() == Value::Tag::String &&
+                 str_def.default_value.as_string() == "text",
                  "string default not encoded as JSON string");
-        WS_CHECK(json.find("\"default_value\":3") != std::string::npos,
+
+        const ColumnWireDefaults &num_def = defs["attempts"];
+        WS_CHECK(num_def.has_default_value,
+                 "numeric default missing");
+        WS_CHECK(num_def.default_value.tag() == Value::Tag::Int64 &&
+                 num_def.default_value.as_int64() == 3,
                  "numeric default not encoded as JSON number");
-        WS_CHECK(json.find("\"default_value\":true") != std::string::npos,
+
+        const ColumnWireDefaults &bool_def = defs["active"];
+        WS_CHECK(bool_def.has_default_value,
+                 "boolean default missing");
+        WS_CHECK(bool_def.default_value.tag() == Value::Tag::Bool &&
+                 bool_def.default_value.as_bool(),
                  "boolean default not encoded as JSON true");
-        WS_CHECK(json.find("\"default_value\":null") != std::string::npos,
+
+        const ColumnWireDefaults &null_def = defs["optional"];
+        WS_CHECK(null_def.has_default_value && null_def.default_value.is_null(),
                  "explicit null default not encoded as JSON null");
-        WS_CHECK(json.find("\"default_value\":\"now\"") != std::string::npos,
+
+        const ColumnWireDefaults &now_lit_def = defs["created_at"];
+        WS_CHECK(now_lit_def.has_default_value,
+                 "literal now default missing");
+        WS_CHECK(now_lit_def.default_value.tag() == Value::Tag::String &&
+                 now_lit_def.default_value.as_string() == "now",
                  "literal now default not encoded as JSON string");
-        WS_CHECK(json.find("\"default_expr\":\"now\"") != std::string::npos,
-                 "default_expr now missing");
+
+        const ColumnWireDefaults &now_expr_def = defs["updated_at"];
+        WS_CHECK(!now_expr_def.has_default_value && now_expr_def.has_default_expr,
+                 "default_expr column must not also emit default_value");
+        WS_CHECK(now_expr_def.default_expr == "now",
+                 "default_expr now missing or wrong");
+
+        const ColumnWireDefaults &both_def = defs["both"];
+        WS_CHECK(!both_def.has_default_value && both_def.has_default_expr,
+                 "when both default_value and default_expr are set, default_expr must win");
+        WS_CHECK(both_def.default_expr == "now",
+                 "precedence winner default_expr mismatch");
+
         printf("PASS: static-default matrix wire shape\n");
     }
 

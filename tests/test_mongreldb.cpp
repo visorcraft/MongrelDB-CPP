@@ -552,7 +552,7 @@ void test_history_retention() {
     CHECK(g_client->history_retention_epochs() == 100,
           "history_retention_epochs getter mismatch");
     std::uint64_t earliest = g_client->earliest_retained_epoch();
-    CHECK(earliest <= cfg.earliest_retained_epoch,
+    CHECK(earliest >= cfg.earliest_retained_epoch,
           "earliest_retained_epoch moved backwards");
 
     fresh_table("cpp_retention", {int_col(1, "id", true), int_col(2, "value", false)});

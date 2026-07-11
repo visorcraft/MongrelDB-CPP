@@ -388,6 +388,35 @@ inline bool get_int(const std::string &body, const std::string &key, std::int64_
     return true;
 }
 
+inline bool get_uint64(const std::string &body, const std::string &key, std::uint64_t &out) {
+    JsonParser j(body);
+    if (j.peek() != '{') return false;
+    j.expect('{');
+    if (j.peek() == '}') return false;
+    for (;;) {
+        if (j.peek() != '"') return false;
+        std::string k = j.read_string_raw();
+        if (!j.ok()) return false;
+        j.expect(':');
+        if (!j.ok()) return false;
+        int ch = j.peek();
+        if (k == key && (ch >= '0' && ch <= '9')) {
+            std::string raw = j.read_number_raw();
+            if (!j.ok()) return false;
+            char *end = nullptr;
+            unsigned long long v = std::strtoull(raw.c_str(), &end, 10);
+            if (end != raw.c_str() + raw.size()) return false;
+            out = static_cast<std::uint64_t>(v);
+            return true;
+        }
+        j.skip_value();
+        if (!j.ok()) return false;
+        ch = j.peek();
+        if (ch == ',') { j.expect(','); continue; }
+        return ch == '}';
+    }
+}
+
 inline bool get_bool(const std::string &body, const std::string &key, bool &out) {
     JsonParser j(body);
     if (j.peek() != '{') return false;
@@ -735,10 +764,12 @@ inline std::int64_t MongrelDBClient::create_table(const std::string &name,
 }
 
 inline HistoryRetention decode_history_retention(const std::string &json) {
-    std::int64_t epochs = 0, earliest = 0;
-    detail::get_int(json, "history_retention_epochs", epochs);
-    detail::get_int(json, "earliest_retained_epoch", earliest);
-    return {static_cast<std::uint64_t>(epochs), static_cast<std::uint64_t>(earliest)};
+    std::uint64_t epochs = 0, earliest = 0;
+    if (!detail::get_uint64(json, "history_retention_epochs", epochs) ||
+        !detail::get_uint64(json, "earliest_retained_epoch", earliest)) {
+        throw QueryException("mongreldb: malformed history retention response");
+    }
+    return {epochs, earliest};
 }
 
 inline HistoryRetention MongrelDBClient::history_retention() {
