@@ -167,17 +167,16 @@ if (res.truncated) {
 
 ## Column constraints: enums and defaults
 
-Each `mongreldb::Column` carries two optional fields that the engine
+Each `mongreldb::Column` carries optional fields that the engine
 enforces at commit time:
 
 - `enum_variants` (`std::vector<std::string>`) - restricts a varchar column to
   a fixed variant set. The engine rejects writes outside the set.
-- `default_value` (`std::optional<std::string>`) - a default-value
-  expression the engine substitutes when a `put` omits the column. The
-  expression follows the engine's default-value DSL (`"42"`, `"'hello'"`,
-  `"now()"`, `"uuid()"`).
+- `default_value_json` sends a caller-validated raw JSON scalar;
+  `default_expr` sends `"now"` or `"uuid"` and takes precedence. The legacy
+  string `default_value` remains supported.
 
-Both fields are omitted from the wire payload when unset, so older servers
+These fields are omitted from the wire payload when unset, so older servers
 that don't recognise them still accept the request.
 
 ```cpp

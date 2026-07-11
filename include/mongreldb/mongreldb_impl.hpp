@@ -483,7 +483,13 @@ inline std::string serialize_column_json(const Column &col) {
         }
         s += "]";
     }
-    if (col.default_value.has_value()) {
+    if (col.default_expr.has_value()) {
+        s += ",\"default_expr\":";
+        json_escape(s, *col.default_expr);
+    } else if (col.default_value_json.has_value()) {
+        s += ",\"default_value\":";
+        s += *col.default_value_json;
+    } else if (col.default_value.has_value()) {
         s += ",\"default_value\":";
         json_escape(s, *col.default_value);
     }

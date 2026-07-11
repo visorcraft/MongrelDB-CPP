@@ -165,9 +165,14 @@ struct Column {
     std::vector<std::string> enum_variants;
     // Optional default-value expression for the column. Unset (default)
     // means no default and the wire payload omits the "default_value"
-    // key entirely. The engine accepts its own default-value DSL
-    // (e.g. "42", "'hello'", "now()", "uuid()").
+    // key entirely. This legacy field always sends a JSON string.
     std::optional<std::string> default_value;
+    // Raw JSON scalar for static defaults. Caller must provide valid scalar
+    // JSON. Takes precedence over the legacy string-only default_value field.
+    std::optional<std::string> default_value_json;
+    // Dynamic default discriminator: "now" or "uuid". Takes precedence over
+    // both default-value fields.
+    std::optional<std::string> default_expr;
 };
 
 // A staged operation in a transaction.

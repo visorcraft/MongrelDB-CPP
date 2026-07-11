@@ -35,6 +35,30 @@ int main() {
         printf("PASS: basic column wire shape\n");
     }
 
+    {
+        Column col;
+        col.id = 4;
+        col.name = "attempts";
+        col.ty = "int64";
+        col.default_value_json = "3";
+        const std::string json = mongreldb::detail::serialize_column_json(col);
+        assert(json.find("\"default_value\":3") != std::string::npos);
+        assert(json.find("default_expr") == std::string::npos);
+    }
+
+    {
+        Column col;
+        col.id = 5;
+        col.name = "created_at";
+        col.ty = "timestamp_nanos";
+        col.default_value = "legacy";
+        col.default_value_json = "3";
+        col.default_expr = "now";
+        const std::string json = mongreldb::detail::serialize_column_json(col);
+        assert(json.find("\"default_expr\":\"now\"") != std::string::npos);
+        assert(json.find("default_value") == std::string::npos);
+    }
+
     // Test 2: Column with enum_variants
     {
         Column col;
@@ -69,7 +93,8 @@ int main() {
 
     // Test 4: top-level CHECK constraints.
     {
-        Column col{1, "score", "int64", false, false, {}, std::nullopt};
+        Column col{1, "score", "int64", false, false, {}, std::nullopt,
+                   std::nullopt, std::nullopt};
         std::string constraints =
             R"({"checks":[{"id":1,"name":"score_nonneg","expr":{"Ge":[{"Col":1},{"Lit":{"Int64":0}}]}}]})";
         std::string json = mongreldb::detail::serialize_create_table_json(
