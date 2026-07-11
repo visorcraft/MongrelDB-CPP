@@ -622,6 +622,9 @@ struct MongrelDBClient::Impl {
                 message = response;
             }
             get_string(response, "code", code);
+            if (message.rfind("not found:", 0) == 0) {
+                throw NotFoundException(message);
+            }
             {
                 double oi = -1;
                 JsonParser j(response);

@@ -41,14 +41,14 @@ static std::vector<mongreldb::Column> schema() {
     c1.primary_key = true; c1.nullable = false;
 
     mongreldb::Column c2;
-    c2.id = 2; c2.name = "status"; c2.ty = "varchar";
+    c2.id = 2; c2.name = "status"; c2.ty = "enum";
     c2.primary_key = false; c2.nullable = false;
     c2.enum_variants = {"pending", "active", "closed"};
 
     mongreldb::Column c3;
     c3.id = 3; c3.name = "amount"; c3.ty = "float64";
     c3.primary_key = false; c3.nullable = false;
-    c3.default_value = std::optional<std::string>{"0.0"};
+    c3.default_value_json = std::optional<std::string>{"0.0"};
 
     mongreldb::Column c4;
     c4.id = 4; c4.name = "note"; c4.ty = "varchar";
