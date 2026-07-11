@@ -22,6 +22,9 @@
 |---|---|---|
 | C++ client | `MongrelDB-CPP` | header-only; build from source with CMake + libcurl |
 
+History retention: `history_retention()` and
+`set_history_retention_epochs(n)`.
+
 ## Requirements
 
 - **A C++17 compiler** (g++ 7+, clang++ 5+, MSVC 19.14+)

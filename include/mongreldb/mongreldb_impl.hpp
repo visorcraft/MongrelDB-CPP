@@ -656,6 +656,9 @@ struct MongrelDBClient::Impl {
     std::string post(const std::string &path, const std::string &body) {
         return request("POST", path, &body);
     }
+    std::string put(const std::string &path, const std::string &body) {
+        return request("PUT", path, &body);
+    }
     std::string del(const std::string &path) {
         return request("DELETE", path, nullptr);
     }
@@ -726,6 +729,22 @@ inline std::vector<std::string> MongrelDBClient::table_names() {
 inline std::int64_t MongrelDBClient::create_table(const std::string &name,
                                            const std::vector<Column> &columns) {
     return create_table(name, columns, "");
+}
+
+inline HistoryRetention decode_history_retention(const std::string &json) {
+    std::int64_t epochs = 0, earliest = 0;
+    detail::get_int(json, "history_retention_epochs", epochs);
+    detail::get_int(json, "earliest_retained_epoch", earliest);
+    return {static_cast<std::uint64_t>(epochs), static_cast<std::uint64_t>(earliest)};
+}
+
+inline HistoryRetention MongrelDBClient::history_retention() {
+    return decode_history_retention(impl_->get("/history/retention"));
+}
+
+inline HistoryRetention MongrelDBClient::set_history_retention_epochs(std::uint64_t epochs) {
+    return decode_history_retention(impl_->put("/history/retention",
+        "{\"history_retention_epochs\":" + std::to_string(epochs) + "}"));
 }
 
 inline std::int64_t MongrelDBClient::create_table(

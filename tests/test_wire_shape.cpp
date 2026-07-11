@@ -35,6 +35,15 @@ int main() {
         printf("PASS: basic column wire shape\n");
     }
 
+    for (const auto &value : {std::string{"\"text\""}, std::string{"true"},
+                              std::string{"null"}, std::string{"\"now\""}}) {
+        Column col;
+        col.default_value_json = value;
+        const auto json = mongreldb::detail::serialize_column_json(col);
+        assert(json.find("\"default_value\":" + value) != std::string::npos);
+        assert(json.find("default_expr") == std::string::npos);
+    }
+
     {
         Column col;
         col.id = 4;

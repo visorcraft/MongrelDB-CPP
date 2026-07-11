@@ -152,6 +152,11 @@ struct Result {
     bool truncated = false;
 };
 
+struct HistoryRetention {
+    std::uint64_t history_retention_epochs = 0;
+    std::uint64_t earliest_retained_epoch = 0;
+};
+
 // A column definition passed to create_table().
 struct Column {
     std::int64_t id = 0;
@@ -230,6 +235,8 @@ public:
     // ── Health & tables ──────────────────────────────────────────────────
     bool health();
     std::vector<std::string> table_names();
+    HistoryRetention history_retention();
+    HistoryRetention set_history_retention_epochs(std::uint64_t epochs);
     std::int64_t create_table(const std::string &name,
                               const std::vector<Column> &columns);
     std::int64_t create_table(const std::string &name,
