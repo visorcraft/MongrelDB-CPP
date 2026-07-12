@@ -73,11 +73,52 @@ jobs:
           MONGRELDB_URL: http://127.0.0.1:8453
         run: ctest --output-on-failure
 
+      - name: Cache mongreldb native libraries
+        id: native-cache
+        uses: actions/cache@v6
+        with:
+          path: native
+          key: mongreldb-native-linux-x64-${{ env.SERVER_VERSION }}
+
+      - name: Download mongreldb native libraries
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p native
+          curl -fsSL \
+            "https://github.com/visorcraft/MongrelDB/releases/download/v${SERVER_VERSION}/mongreldb-native-linux-x64-gnu.tar.gz" \
+            | tar xz -C native
+          curl -fsSL \
+            "https://github.com/visorcraft/MongrelDB/releases/download/v${SERVER_VERSION}/mongreldb-kit-native-linux-x64-gnu.tar.gz" \
+            | tar xz -C native
+          test -f native/mongreldb-native/lib/libmongreldb.so
+          test -f native/mongreldb-kit-native/lib/libmongreldb_kit.so
+          test -f native/mongreldb-kit-native/include/mongreldb_kit.h
+
       - name: Run examples
         run: |
           for ex in examples/*.cpp; do
             echo "=== Running $ex ==="
-            g++ -std=c++17 -Iinclude -o /tmp/ex "$ex" src/mongreldb.cpp -lcurl
+            case "$ex" in
+              examples/native_*.cpp)
+                # Native (Kit FFI) examples link libmongreldb_kit +
+                # libmongreldb in-process; the daemon is not used.
+                g++ -std=c++17 \
+                  -Iinclude \
+                  -Inative/mongreldb-native/include \
+                  -Inative/mongreldb-kit-native/include \
+                  -o /tmp/ex "$ex" \
+                  -Lnative/mongreldb-kit-native/lib -lmongreldb_kit \
+                  -Lnative/mongreldb-native/lib -lmongreldb \
+                  -lpthread -ldl -lm \
+                  -Wl,-rpath,"$(pwd)"/native/mongreldb-kit-native/lib \
+                  -Wl,-rpath,"$(pwd)"/native/mongreldb-native/lib
+                ;;
+              *)
+                # HTTP client examples compile against the bundled headers
+                # and talk to the running daemon over libcurl.
+                g++ -std=c++17 -Iinclude -o /tmp/ex "$ex" src/mongreldb.cpp -lcurl
+                ;;
+            esac
             /tmp/ex || { echo "FAILED: $ex"; exit 1; }
           done
 
