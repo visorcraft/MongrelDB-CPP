@@ -423,9 +423,8 @@ int main() {
 
             WS_CHECK(reqs[0].method == "PUT", "expected PUT method");
             WS_CHECK(reqs[0].path == "/history/retention", "expected /history/retention path");
-            WS_CHECK(reqs[0].body.find("\"history_retention_epochs\":42") !=
-                     std::string::npos,
-                     "PUT body missing history_retention_epochs key");
+            WS_CHECK(reqs[0].body == "{\"history_retention_epochs\":42}",
+                     "PUT body must be the exact JSON object");
 
             WS_CHECK(reqs[1].method == "GET", "expected first GET method");
             WS_CHECK(reqs[1].path == "/history/retention",
@@ -485,6 +484,43 @@ int main() {
         assert(json.find("\"constraints\":{\"checks\":[") != std::string::npos);
         assert(json.find("\"name\":\"score_nonneg\"") != std::string::npos);
         printf("PASS: CHECK constraints wire shape\n");
+    }
+
+    // Test 7: error propagation — a non-2xx response surfaces as the client's
+    // typed QueryException, not a silent success.
+    {
+        MiniHttpServer server;
+        if (!server.start()) {
+            printf("SKIP: error propagation test (no socket support)\n");
+        } else {
+            server.set_response(503,
+                "{\"message\":\"server overloaded\",\"code\":\"UNAVAILABLE\"}");
+            std::string url = "http://127.0.0.1:" + std::to_string(server.port());
+            MongrelDBClient client(url);
+
+            // GET path: history_retention_epochs() must throw.
+            bool threw = false;
+            try {
+                (void)client.history_retention_epochs();
+            } catch (const QueryException &) {
+                threw = true;
+            }
+            WS_CHECK(threw,
+                     "503 on GET /history/retention must throw QueryException");
+
+            // PUT path: set_history_retention_epochs() must also throw.
+            threw = false;
+            try {
+                (void)client.set_history_retention_epochs(99);
+            } catch (const QueryException &) {
+                threw = true;
+            }
+            WS_CHECK(threw,
+                     "503 on PUT /history/retention must throw QueryException");
+
+            server.stop();
+            printf("PASS: error propagation\n");
+        }
     }
 
     printf("All wire-shape tests passed.\n");
