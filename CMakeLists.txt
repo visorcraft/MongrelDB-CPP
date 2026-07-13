@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(mongreldb_cpp
-    VERSION 0.1.0
+    VERSION 0.52.2
     DESCRIPTION "Header-only C++17 HTTP client for MongrelDB"
     LANGUAGES CXX
 )
