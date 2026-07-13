@@ -910,7 +910,8 @@ inline void MongrelDBClient::commit(const std::vector<Op> &ops,
 inline Result MongrelDBClient::query(const std::string &table,
                               const std::vector<Condition> &conditions,
                               const std::vector<std::int64_t> &projection,
-                              std::int64_t limit) {
+                              std::int64_t limit,
+                              std::int64_t offset) {
     std::string body = "{\"table\":";
     json_escape(body, table);
     if (!conditions.empty()) {
@@ -994,6 +995,12 @@ inline Result MongrelDBClient::query(const std::string &table,
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(limit));
         body += ",\"limit\":";
+        body += buf;
+    }
+    if (offset != 0) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(offset));
+        body += ",\"offset\":";
         body += buf;
     }
     body.push_back('}');

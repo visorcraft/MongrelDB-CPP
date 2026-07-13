@@ -264,7 +264,8 @@ public:
     Result query(const std::string &table,
                  const std::vector<Condition> &conditions = {},
                  const std::vector<std::int64_t> &projection = {},
-                 std::int64_t limit = 0);
+                 std::int64_t limit = 0,
+                 std::int64_t offset = 0);
 
     // ── SQL ─────────────────────────────────────────────────────────────
     // Executes a SQL statement. The client sends `format:"json"` with every

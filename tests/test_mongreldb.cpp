@@ -398,6 +398,12 @@ void test_query_range() {
     std::int64_t amt = cell_int64(res.rows[0], 2, &found);
     CHECK(found && amt == 120, "expected returned amount 120, got %lld",
           static_cast<long long>(amt));
+
+    auto page = g_client->query("cpp_range", {}, {}, 1, 2);
+    CHECK(page.rows.size() == 1, "expected one row on offset page");
+    std::int64_t page_pk = cell_int64(page.rows[0], 1, &found);
+    CHECK(found && page_pk == 3, "expected offset page pk 3, got %lld",
+          static_cast<long long>(page_pk));
 }
 
 void test_transaction_commit() {

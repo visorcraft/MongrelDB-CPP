@@ -305,7 +305,7 @@ try {
 | `del(table, row_id)` | Delete by row id |
 | `delete_by_pk(table, pk)` | Delete by primary key |
 | `commit(ops, key)` | Commit a batch atomically |
-| `query(table, conds, proj, limit)` | Run a native query (returns `Result`) |
+| `query(table, conds, proj, limit, offset)` | Run a paged native query (returns `Result`) |
 | `sql(statement)` | Execute SQL (returns raw body) |
 | `schema()` | Full schema catalog (raw JSON) |
 | `schema_for(table)` | Single-table descriptor (raw JSON) |
