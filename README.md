@@ -403,7 +403,7 @@ curl -fsSL -o native.tar.gz \
 tar xzf native.tar.gz  # produces mongreldb-native/{lib,include}/
 
 curl -fsSL -o kit-native.tar.gz \
-  https://github.com/visorcraft/MongrelDB/releases/download/v0.63.0/mongreldb-kit-native-linux-x64-gnu.tar.gz
+  https://github.com/visorcraft/MongrelDB/releases/download/v0.63.1/mongreldb-kit-native-linux-x64-gnu.tar.gz
 tar xzf kit-native.tar.gz  # produces mongreldb-kit-native/{lib,include}/
 ```
 
