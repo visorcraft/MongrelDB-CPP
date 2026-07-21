@@ -277,6 +277,13 @@ extract_column_defaults(const std::string &json) {
     } while (0)
 
 int main() {
+    {
+        std::string json;
+        mongreldb::detail::json_value(json, Value::json("[1.0,-2.0]"));
+        assert(json == "[1.0,-2.0]");
+        printf("PASS: raw embedding JSON value wire shape\n");
+    }
+
     // Test 1: Basic column (no optional fields)
     {
         Column col;
@@ -476,7 +483,7 @@ int main() {
     // Test 6: top-level CHECK constraints.
     {
         Column col{1, "score", "int64", false, false, {}, std::nullopt,
-                   std::nullopt, std::nullopt};
+                   std::nullopt, std::nullopt, std::nullopt};
         std::string constraints =
             R"({"checks":[{"id":1,"name":"score_nonneg","expr":{"Ge":[{"Col":1},{"Lit":{"Int64":0}}]}}]})";
         std::string json = mongreldb::detail::serialize_create_table_json(
@@ -486,7 +493,60 @@ int main() {
         printf("PASS: CHECK constraints wire shape\n");
     }
 
-    // Test 7: error propagation — a non-2xx response surfaces as the client's
+    // Test 7: all public index kinds, Dense ANN options, and model source.
+    {
+        Column id;
+        id.id = 1;
+        id.name = "id";
+        id.ty = "int64";
+        id.primary_key = true;
+        Column embedding;
+        embedding.id = 2;
+        embedding.name = "embedding";
+        embedding.ty = "embedding(384)";
+        embedding.embedding_source_json =
+            R"({"kind":"configured_model","provider_id":"docs","model_id":"model","model_version":"1"})";
+
+        std::vector<Index> indexes;
+        for (const auto kind : {IndexKind::Bitmap, IndexKind::Fm, IndexKind::Ann,
+                                IndexKind::LearnedRange, IndexKind::MinHash,
+                                IndexKind::Sparse}) {
+            Index index;
+            index.name = "idx_" + std::to_string(indexes.size());
+            index.column_id = kind == IndexKind::Ann ? 2 : 1;
+            index.kind = kind;
+            if (kind == IndexKind::Ann) {
+                index.predicate = "embedding IS NOT NULL";
+                index.ann_m = 24;
+                index.ann_ef_construction = 96;
+                index.ann_ef_search = 48;
+                index.ann_quantization = AnnQuantization::Dense;
+            }
+            if (kind == IndexKind::LearnedRange) index.learned_range_epsilon = 8;
+            if (kind == IndexKind::MinHash) {
+                index.minhash_permutations = 64;
+                index.minhash_bands = 16;
+            }
+            indexes.push_back(index);
+        }
+        std::string json = mongreldb::detail::serialize_create_table_json(
+            "search_docs", {id, embedding}, "", indexes);
+        assert(json.find("\"embedding_source\":{\"kind\":\"configured_model\"") != std::string::npos);
+        assert(json.find("\"kind\":\"bitmap\"") != std::string::npos);
+        assert(json.find("\"kind\":\"fm_index\"") != std::string::npos);
+        assert(json.find("\"kind\":\"ann\"") != std::string::npos);
+        assert(json.find("\"quantization\":\"dense\"") != std::string::npos);
+        assert(json.find("\"m\":24") != std::string::npos);
+        assert(json.find("\"predicate\":\"embedding IS NOT NULL\"") != std::string::npos);
+        assert(json.find("\"kind\":\"learned_range\"") != std::string::npos);
+        assert(json.find("\"epsilon\":8") != std::string::npos);
+        assert(json.find("\"kind\":\"minhash\"") != std::string::npos);
+        assert(json.find("\"permutations\":64") != std::string::npos);
+        assert(json.find("\"kind\":\"sparse\"") != std::string::npos);
+        printf("PASS: all index kinds and embedding source wire shape\n");
+    }
+
+    // Test 8: error propagation — a non-2xx response surfaces as the client's
     // typed QueryException, not a silent success.
     {
         MiniHttpServer server;

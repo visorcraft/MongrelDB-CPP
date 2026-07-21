@@ -186,6 +186,11 @@ if (res.truncated) {
 }
 ```
 
+For `ann`, `sparse_match`, `minhash_similar_members`, `bitmap_in`, and every
+other complete server condition, set `Condition::condition_json`. Use
+`Value::json(...)` for embedding vectors, sparse pairs, sets, arrays, and
+object cell values.
+
 ## Column constraints: enums and defaults
 
 Each `mongreldb::Column` carries optional fields that the engine
@@ -298,6 +303,7 @@ try {
 | `set_history_retention_epochs(n)` | Resize the MVCC window; returns `HistoryRetention` |
 | `create_table(name, columns)` | Create a table (returns table id); each `Column` may set `enum_variants`, `default_value`, `default_value_json`, or `default_expr` |
 | `create_table(name, columns, constraints_json)` | Create a table with native `constraints` JSON (including CHECKs) |
+| `create_table(name, columns, constraints_json, indexes)` | Create a table with all six index kinds and options |
 | `drop_table(name)` | Drop a table |
 | `count(table)` | Row count |
 | `put(table, cells, key)` | Insert a row |

@@ -85,6 +85,7 @@ inline void json_value(std::string &out, const Value &v) {
             break;
         }
         case Value::Tag::String: json_escape(out, v.as_string()); break;
+        case Value::Tag::Json: out += v.as_json(); break;
     }
 }
 
@@ -297,8 +298,9 @@ public:
             return Value::string(read_string_raw());
         }
         if (ch == '{' || ch == '[') {
+            std::size_t start = i_;
             skip_value();
-            return Value{}; // null for composite values (not used for cells)
+            return Value::json(s_.substr(start, i_ - start));
         }
         if (ch == 't' || ch == 'f') {
             std::size_t start = i_;
@@ -522,13 +524,55 @@ inline std::string serialize_column_json(const Column &col) {
         s += ",\"default_value\":";
         json_escape(s, *col.default_value);
     }
+    if (col.embedding_source_json.has_value()) {
+        s += ",\"embedding_source\":";
+        s += *col.embedding_source_json;
+    }
     s.push_back('}');
     return s;
 }
 
+inline std::string serialize_index_json(const Index &index) {
+    const char *kind = "bitmap";
+    switch (index.kind) {
+        case IndexKind::Bitmap: kind = "bitmap"; break;
+        case IndexKind::Fm: kind = "fm_index"; break;
+        case IndexKind::Ann: kind = "ann"; break;
+        case IndexKind::LearnedRange: kind = "learned_range"; break;
+        case IndexKind::MinHash: kind = "minhash"; break;
+        case IndexKind::Sparse: kind = "sparse"; break;
+    }
+    std::string out = "{\"name\":";
+    json_escape(out, index.name);
+    out += ",\"column_id\":" + std::to_string(index.column_id) + ",\"kind\":";
+    json_escape(out, kind);
+    if (index.predicate.has_value()) {
+        out += ",\"predicate\":";
+        json_escape(out, *index.predicate);
+    }
+    if (index.kind == IndexKind::Ann) {
+        out += ",\"options\":{\"ann\":{\"m\":" + std::to_string(index.ann_m)
+            + ",\"ef_construction\":" + std::to_string(index.ann_ef_construction)
+            + ",\"ef_search\":" + std::to_string(index.ann_ef_search)
+            + ",\"quantization\":\""
+            + (index.ann_quantization == AnnQuantization::Dense ? "dense" : "binary_sign")
+            + "\"}}";
+    } else if (index.kind == IndexKind::MinHash) {
+        out += ",\"options\":{\"minhash\":{\"permutations\":"
+            + std::to_string(index.minhash_permutations) + ",\"bands\":"
+            + std::to_string(index.minhash_bands) + "}}";
+    } else if (index.kind == IndexKind::LearnedRange) {
+        out += ",\"options\":{\"learned_range\":{\"epsilon\":"
+            + std::to_string(index.learned_range_epsilon) + "}}";
+    }
+    out.push_back('}');
+    return out;
+}
+
 inline std::string serialize_create_table_json(
         const std::string &name, const std::vector<Column> &columns,
-        const std::string &constraints_json = "") {
+        const std::string &constraints_json = "",
+        const std::vector<Index> &indexes = {}) {
     std::string body = "{\"name\":";
     json_escape(body, name);
     body += ",\"columns\":[";
@@ -540,6 +584,14 @@ inline std::string serialize_create_table_json(
     if (!constraints_json.empty()) {
         body += ",\"constraints\":";
         body += constraints_json;
+    }
+    if (!indexes.empty()) {
+        body += ",\"indexes\":[";
+        for (std::size_t i = 0; i < indexes.size(); ++i) {
+            if (i > 0) body.push_back(',');
+            body += serialize_index_json(indexes[i]);
+        }
+        body.push_back(']');
     }
     body.push_back('}');
     return body;
@@ -792,8 +844,14 @@ inline std::uint64_t MongrelDBClient::earliest_retained_epoch() {
 inline std::int64_t MongrelDBClient::create_table(
         const std::string &name, const std::vector<Column> &columns,
         const std::string &constraints_json) {
+    return create_table(name, columns, constraints_json, {});
+}
+
+inline std::int64_t MongrelDBClient::create_table(
+        const std::string &name, const std::vector<Column> &columns,
+        const std::string &constraints_json, const std::vector<Index> &indexes) {
     std::string body = detail::serialize_create_table_json(
-        name, columns, constraints_json);
+        name, columns, constraints_json, indexes);
     std::string resp = impl_->post("/kit/create_table", body);
     std::int64_t tid = 0;
     get_int(resp, "table_id", tid);
@@ -919,6 +977,10 @@ inline Result MongrelDBClient::query(const std::string &table,
         for (std::size_t i = 0; i < conditions.size(); ++i) {
             if (i > 0) body.push_back(',');
             const Condition &c = conditions[i];
+            if (c.condition_json.has_value()) {
+                body += *c.condition_json;
+                continue;
+            }
             body.push_back('{');
             char buf[32];
             std::snprintf(buf, sizeof(buf), "%lld",

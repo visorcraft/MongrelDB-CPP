@@ -100,7 +100,7 @@ public:
 // the public ABI simple and copyable.
 class Value {
 public:
-    enum class Tag { Null, Bool, Int64, Double, String };
+    enum class Tag { Null, Bool, Int64, Double, String, Json };
 
     Value() : tag_(Tag::Null) {}
     static Value boolean(bool b) {
@@ -115,6 +115,10 @@ public:
     static Value string(std::string s) {
         Value v; v.tag_ = Tag::String; v.s_ = std::move(s); return v;
     }
+    /** Raw valid JSON for embeddings, sparse vectors, sets, arrays, or objects. */
+    static Value json(std::string s) {
+        Value v; v.tag_ = Tag::Json; v.s_ = std::move(s); return v;
+    }
 
     Tag tag() const noexcept { return tag_; }
     bool is_null() const noexcept { return tag_ == Tag::Null; }
@@ -123,6 +127,7 @@ public:
     std::int64_t as_int64() const { return ensure(Tag::Int64), i_; }
     double as_double() const { return ensure(Tag::Double), d_; }
     const std::string &as_string() const { return ensure(Tag::String), s_; }
+    const std::string &as_json() const { return ensure(Tag::Json), s_; }
 
 private:
     void ensure(Tag expected) const {
@@ -178,6 +183,25 @@ struct Column {
     // Dynamic default discriminator: "now" or "uuid". Takes precedence over
     // both default-value fields.
     std::optional<std::string> default_expr;
+    // Portable EmbeddingSource JSON. Unset means application-supplied vectors.
+    std::optional<std::string> embedding_source_json;
+};
+
+enum class IndexKind { Bitmap, Fm, Ann, LearnedRange, MinHash, Sparse };
+enum class AnnQuantization { BinarySign, Dense };
+
+struct Index {
+    std::string name;
+    std::int64_t column_id = 0;
+    IndexKind kind = IndexKind::Bitmap;
+    std::optional<std::string> predicate;
+    std::size_t ann_m = 16;
+    std::size_t ann_ef_construction = 64;
+    std::size_t ann_ef_search = 64;
+    AnnQuantization ann_quantization = AnnQuantization::BinarySign;
+    std::size_t minhash_permutations = 128;
+    std::size_t minhash_bands = 32;
+    std::size_t learned_range_epsilon = 16;
 };
 
 // A staged operation in a transaction.
@@ -207,6 +231,9 @@ struct Condition {
     std::string str_value;
     // PK value as an integer (used when str_value is empty).
     std::int64_t int_value = 0;
+    // Complete externally-tagged JsonCondition object for variable-length
+    // ANN, sparse, MinHash, bitmap-in, and FM-all queries.
+    std::optional<std::string> condition_json;
 };
 
 // ── Client ──────────────────────────────────────────────────────────────
@@ -244,6 +271,10 @@ public:
     std::int64_t create_table(const std::string &name,
                               const std::vector<Column> &columns,
                               const std::string &constraints_json);
+    std::int64_t create_table(const std::string &name,
+                              const std::vector<Column> &columns,
+                              const std::string &constraints_json,
+                              const std::vector<Index> &indexes);
     void drop_table(const std::string &name);
     std::int64_t count(const std::string &table);
 
