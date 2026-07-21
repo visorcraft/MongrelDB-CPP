@@ -551,12 +551,65 @@ inline std::string serialize_index_json(const Index &index) {
         json_escape(out, *index.predicate);
     }
     if (index.kind == IndexKind::Ann) {
+        const char *quantization = "binary_sign";
+        switch (index.ann_quantization) {
+            case AnnQuantization::Dense: quantization = "dense"; break;
+            case AnnQuantization::Product: quantization = "product"; break;
+            case AnnQuantization::BinarySign: break;
+        }
         out += ",\"options\":{\"ann\":{\"m\":" + std::to_string(index.ann_m)
             + ",\"ef_construction\":" + std::to_string(index.ann_ef_construction)
             + ",\"ef_search\":" + std::to_string(index.ann_ef_search)
             + ",\"quantization\":\""
-            + (index.ann_quantization == AnnQuantization::Dense ? "dense" : "binary_sign")
-            + "\"}}";
+            + quantization
+            + "\"";
+        /* algorithm: emit only when not the default (hnsw), to preserve the
+         * wire shape for existing clients. */
+        if (index.ann_algorithm != AnnAlgorithm::Hnsw) {
+            const char *algorithm = "hnsw";
+            switch (index.ann_algorithm) {
+                case AnnAlgorithm::Diskann: algorithm = "diskann"; break;
+                case AnnAlgorithm::Ivf: algorithm = "ivf"; break;
+                case AnnAlgorithm::Hnsw: break;
+            }
+            out += ",\"algorithm\":\"";
+            out += algorithm;
+            out += "\"";
+            /* Per-algorithm tuning: emit only when non-default, matching the
+             * engine's skip_serializing_if convention. */
+            if (index.ann_algorithm == AnnAlgorithm::Diskann) {
+                std::size_t r = index.diskann_r ? index.diskann_r : 64;
+                std::size_t l = index.diskann_l ? index.diskann_l : 128;
+                std::size_t beam = index.diskann_beam_width ? index.diskann_beam_width : 8;
+                std::uint32_t alpha = index.diskann_alpha ? index.diskann_alpha : 120;
+                char buf[96];
+                std::snprintf(buf, sizeof(buf),
+                    ",\"diskann\":{\"r\":%zu,\"l\":%zu,\"beam_width\":%zu,\"alpha\":%u}",
+                    r, l, beam, alpha);
+                out += buf;
+            } else if (index.ann_algorithm == AnnAlgorithm::Ivf) {
+                std::size_t nlist = index.ivf_nlist ? index.ivf_nlist : 256;
+                std::size_t nprobe = index.ivf_nprobe ? index.ivf_nprobe : 8;
+                char buf[64];
+                std::snprintf(buf, sizeof(buf),
+                    ",\"ivf\":{\"nlist\":%zu,\"nprobe\":%zu}", nlist, nprobe);
+                out += buf;
+            }
+        }
+        if (index.ann_quantization == AnnQuantization::Product) {
+            std::size_t training = index.pq_training_samples
+                ? index.pq_training_samples : 256000;
+            std::uint64_t seed = index.pq_seed ? index.pq_seed
+                : 0x9E3779B97F4A7C15ULL;
+            std::size_t rerank = index.pq_rerank_factor
+                ? index.pq_rerank_factor : 5;
+            char buf[96];
+            std::snprintf(buf, sizeof(buf),
+                ",\"product\":{\"training_samples\":%zu,\"seed\":%llu,\"rerank_factor\":%zu}",
+                training, static_cast<unsigned long long>(seed), rerank);
+            out += buf;
+        }
+        out += "}}";
     } else if (index.kind == IndexKind::MinHash) {
         out += ",\"options\":{\"minhash\":{\"permutations\":"
             + std::to_string(index.minhash_permutations) + ",\"bands\":"

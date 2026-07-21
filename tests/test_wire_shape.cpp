@@ -583,6 +583,62 @@ int main() {
         }
     }
 
+    // Test 9: swappable ANN algorithms (DiskANN / IVF) and product
+    // quantization serialize to the expected JSON wire shape. Mirrors the C
+    // client's test_wire_shape.c Test 13 so both bindings emit byte-identical
+    // /kit/create_table index payloads.
+    {
+        Index diskann;
+        diskann.name = "ann_diskann";
+        diskann.column_id = 2;
+        diskann.kind = IndexKind::Ann;
+        diskann.ann_quantization = AnnQuantization::Dense;
+        diskann.ann_algorithm = AnnAlgorithm::Diskann;
+        diskann.diskann_r = 128;
+        diskann.diskann_l = 256;
+        diskann.diskann_beam_width = 4;
+        diskann.diskann_alpha = 130;
+        std::string json = mongreldb::detail::serialize_index_json(diskann);
+        assert(json.find("\"algorithm\":\"diskann\"") != std::string::npos);
+        assert(json.find("\"quantization\":\"dense\"") != std::string::npos);
+        assert(json.find("\"diskann\":{\"r\":128") != std::string::npos);
+        assert(json.find("\"l\":256") != std::string::npos);
+        assert(json.find("\"beam_width\":4") != std::string::npos);
+        assert(json.find("\"alpha\":130") != std::string::npos);
+
+        Index ivf;
+        ivf.name = "ann_ivf";
+        ivf.column_id = 2;
+        ivf.kind = IndexKind::Ann;
+        ivf.ann_quantization = AnnQuantization::Dense;
+        ivf.ann_algorithm = AnnAlgorithm::Ivf;
+        ivf.ivf_nlist = 512;
+        ivf.ivf_nprobe = 16;
+        json = mongreldb::detail::serialize_index_json(ivf);
+        assert(json.find("\"algorithm\":\"ivf\"") != std::string::npos);
+        assert(json.find("\"ivf\":{\"nlist\":512,\"nprobe\":16}") != std::string::npos);
+
+        Index pq;
+        pq.name = "ann_pq";
+        pq.column_id = 2;
+        pq.kind = IndexKind::Ann;
+        pq.ann_quantization = AnnQuantization::Product;
+        pq.pq_num_subvectors = 32;
+        pq.pq_bits = 8;
+        pq.pq_training_samples = 10000;
+        pq.pq_seed = 42;
+        pq.pq_rerank_factor = 3;
+        json = mongreldb::detail::serialize_index_json(pq);
+        assert(json.find("\"quantization\":\"product\"") != std::string::npos);
+        assert(json.find("\"product\":{\"training_samples\":10000") != std::string::npos);
+        assert(json.find("\"seed\":42") != std::string::npos);
+        assert(json.find("\"rerank_factor\":3") != std::string::npos);
+        /* Default algorithm (HNSW) is omitted to preserve wire shape. */
+        assert(json.find("\"algorithm\":") == std::string::npos);
+
+        printf("PASS: swappable ANN algorithm and product-quantization wire shape\n");
+    }
+
     printf("All wire-shape tests passed.\n");
     return 0;
 }
