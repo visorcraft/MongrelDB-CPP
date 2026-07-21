@@ -188,7 +188,11 @@ struct Column {
 };
 
 enum class IndexKind { Bitmap, Fm, Ann, LearnedRange, MinHash, Sparse };
-enum class AnnQuantization { BinarySign, Dense };
+enum class AnnQuantization { BinarySign, Dense, Product };
+// Phase 2: ANN graph/structure algorithm. Orthogonal to quantization. The
+// default (Hnsw) preserves the legacy wire shape and is omitted from the JSON
+// payload; Diskann and Ivf emit a "diskann" / "ivf" tuning block.
+enum class AnnAlgorithm { Hnsw, Diskann, Ivf };
 
 struct Index {
     std::string name;
@@ -199,6 +203,27 @@ struct Index {
     std::size_t ann_ef_construction = 64;
     std::size_t ann_ef_search = 64;
     AnnQuantization ann_quantization = AnnQuantization::BinarySign;
+    // Phase 2: swappable ANN backend. Zero/empty selects the engine default.
+    AnnAlgorithm ann_algorithm = AnnAlgorithm::Hnsw;
+    // DiskANN tuning (read when ann_algorithm == AnnAlgorithm::Diskann).
+    // 0 selects engine defaults (r=64, l=128, beam_width=8, alpha=120).
+    std::size_t diskann_r = 0;
+    std::size_t diskann_l = 0;
+    std::size_t diskann_beam_width = 0;
+    std::uint32_t diskann_alpha = 0;  // alpha x 100 (120 = 1.2). 0 = default.
+    // IVF tuning (read when ann_algorithm == AnnAlgorithm::Ivf).
+    // 0 selects engine defaults (nlist=256, nprobe=8).
+    std::size_t ivf_nlist = 0;
+    std::size_t ivf_nprobe = 0;
+    // Product quantization (read when ann_quantization == AnnQuantization::Product).
+    // pq_num_subvectors/pq_bits are caller-specified and not defaulted here.
+    // 0 for the size_t fields selects engine defaults
+    // (training_samples=256000, seed=golden-ratio, rerank_factor=5).
+    std::uint16_t pq_num_subvectors = 0;
+    std::uint8_t pq_bits = 0;  // 0 = default (8). Only 8 is supported.
+    std::size_t pq_training_samples = 0;
+    std::uint64_t pq_seed = 0;
+    std::size_t pq_rerank_factor = 0;
     std::size_t minhash_permutations = 128;
     std::size_t minhash_bands = 32;
     std::size_t learned_range_epsilon = 16;
