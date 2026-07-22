@@ -639,6 +639,143 @@ int main() {
         printf("PASS: swappable ANN algorithm and product-quantization wire shape\n");
     }
 
+    // Test 10: durable HLC query-status structural decode.
+    {
+        const std::string raw = R"({
+            "query_id": "abcdefabcdefabcdefabcdefabcdefab",
+            "status": "committed",
+            "state": "completed",
+            "server_state": "completed",
+            "terminal_state": "committed",
+            "committed": true,
+            "committed_statements": 1,
+            "last_commit_epoch": 17,
+            "last_commit_epoch_text": "17",
+            "last_commit_hlc": {
+                "physical_micros": 1700000000000000,
+                "logical": 3,
+                "node_tiebreaker": 7
+            },
+            "outcome": {
+                "committed": true,
+                "committed_statements": 1,
+                "last_commit_epoch": 17,
+                "last_commit_hlc": {
+                    "physical_micros": 1700000000000000,
+                    "logical": 3,
+                    "node_tiebreaker": 7
+                },
+                "serialization": "succeeded",
+                "serialization_state": "succeeded",
+                "terminal_state": "committed"
+            },
+            "durable": {
+                "committed": true,
+                "committed_statements": 1,
+                "last_commit_epoch": 17,
+                "last_commit_hlc": {
+                    "physical_micros": 1700000000000000,
+                    "logical": 3,
+                    "node_tiebreaker": 7
+                },
+                "serialization": "succeeded",
+                "serialization_state": "succeeded",
+                "terminal_state": "committed"
+            }
+        })";
+        QueryStatus st = mongreldb::detail::parse_query_status_json(raw);
+        assert(st.committed.has_value() && *st.committed);
+        assert(st.durable.has_value());
+        assert(st.outcome.last_commit_epoch.has_value() &&
+               *st.outcome.last_commit_epoch == 17);
+        auto hlc = st.commit_hlc();
+        assert(hlc.has_value());
+        assert(hlc->physical_micros == 1700000000000000ULL);
+        assert(hlc->logical == 3);
+        assert(hlc->node_tiebreaker == 7);
+        assert(st.serialization_state() == "succeeded");
+        printf("PASS: durable HLC query-status structural decode\n");
+    }
+
+    // Test 11: commit_hlc preference durable > outcome > top-level.
+    {
+        const std::string raw = R"({
+            "last_commit_hlc": {"physical_micros": 1, "logical": 1, "node_tiebreaker": 1},
+            "outcome": {"last_commit_hlc": {"physical_micros": 2, "logical": 2, "node_tiebreaker": 2}},
+            "durable": {"last_commit_hlc": {"physical_micros": 3, "logical": 3, "node_tiebreaker": 3}}
+        })";
+        QueryStatus st = mongreldb::detail::parse_query_status_json(raw);
+        auto hlc = st.commit_hlc();
+        assert(hlc.has_value() && hlc->physical_micros == 3);
+
+        const std::string raw2 = R"({
+            "last_commit_hlc": {"physical_micros": 1, "logical": 1, "node_tiebreaker": 1},
+            "outcome": {"last_commit_hlc": {"physical_micros": 2, "logical": 2, "node_tiebreaker": 2}}
+        })";
+        st = mongreldb::detail::parse_query_status_json(raw2);
+        hlc = st.commit_hlc();
+        assert(hlc.has_value() && hlc->physical_micros == 2);
+        printf("PASS: commit_hlc preference order durable > outcome > top\n");
+    }
+
+    // Test 12: retrieve_text body + HTTP transport contract.
+    {
+        std::string body =
+            mongreldb::detail::build_retrieve_text_body("docs", 3, "cat sat", 5);
+        assert(body.find("\"table\":\"docs\"") != std::string::npos);
+        assert(body.find("\"embedding_column\":3") != std::string::npos);
+        assert(body.find("\"text\":\"cat sat\"") != std::string::npos);
+        assert(body.find("\"k\":5") != std::string::npos);
+        body = mongreldb::detail::build_retrieve_text_body("docs", 3, "cat sat", 0);
+        assert(body.find("\"k\":") == std::string::npos);
+
+        MiniHttpServer server;
+        if (!server.start()) {
+            printf("SKIP: retrieve_text/query_status transport (no socket support)\n");
+        } else {
+            server.set_response(200,
+                "{\"hits\":[{\"score\":0.9}],\"provenance\":{\"model\":\"x\"}}");
+            std::string url = "http://127.0.0.1:" + std::to_string(server.port());
+            MongrelDBClient client(url);
+            auto result = client.retrieve_text("docs", 3, "cat sat", 5);
+            assert(result.hits_json.find("score") != std::string::npos);
+            assert(result.provenance_json.find("model") != std::string::npos);
+            auto reqs = server.take_requests();
+            WS_CHECK(reqs.size() == 1, "expected 1 retrieve_text request");
+            WS_CHECK(reqs[0].method == "POST", "expected POST");
+            WS_CHECK(reqs[0].path == "/kit/retrieve_text",
+                     "expected /kit/retrieve_text path");
+            WS_CHECK(reqs[0].body.find("\"embedding_column\":3") != std::string::npos,
+                     "retrieve_text body missing embedding_column");
+
+            server.set_response(200, R"({
+                "query_id":"q1","status":"committed","state":"completed",
+                "durable":{"last_commit_hlc":{"physical_micros":9,"logical":1,"node_tiebreaker":2},
+                           "serialization_state":"succeeded"}
+            })");
+            QueryStatus qs = client.query_status("q1");
+            assert(qs.commit_hlc().has_value() &&
+                   qs.commit_hlc()->physical_micros == 9);
+            reqs = server.take_requests();
+            WS_CHECK(reqs.size() == 1, "expected 1 query_status request");
+            WS_CHECK(reqs[0].method == "GET", "expected GET query_status");
+            WS_CHECK(reqs[0].path == "/queries/q1", "expected /queries/q1");
+
+            server.set_response(200, "{\"cancelled\":true}");
+            std::string cancel_body = client.cancel_query("q1");
+            assert(cancel_body.find("cancelled") != std::string::npos);
+            reqs = server.take_requests();
+            WS_CHECK(reqs.size() == 1, "expected 1 cancel request");
+            WS_CHECK(reqs[0].method == "POST", "expected POST cancel");
+            WS_CHECK(reqs[0].path == "/queries/q1/cancel",
+                     "expected /queries/q1/cancel");
+
+            server.stop();
+            printf("PASS: retrieve_text/query_status/cancel transport contract\n");
+        }
+        printf("PASS: retrieve_text request body wire shape\n");
+    }
+
     printf("All wire-shape tests passed.\n");
     return 0;
 }

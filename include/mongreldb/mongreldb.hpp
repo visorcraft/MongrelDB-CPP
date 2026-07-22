@@ -29,8 +29,9 @@ namespace mongreldb {
 // ── Version ──────────────────────────────────────────────────────────────
 
 inline constexpr int kVersionMajor = 0;
-inline constexpr int kVersionMinor = 1;
+inline constexpr int kVersionMinor = 64;
 inline constexpr int kVersionPatch = 0;
+inline constexpr const char *kVersion = "0.64.0";
 
 inline constexpr const char *kDefaultUrl = "http://127.0.0.1:8453";
 
@@ -160,6 +161,90 @@ struct Result {
 struct HistoryRetention {
     std::uint64_t history_retention_epochs = 0;
     std::uint64_t earliest_retained_epoch = 0;
+};
+
+// Structural hybrid logical clock from durable recovery (0.64+).
+struct CommitHlc {
+    std::uint64_t physical_micros = 0;
+    std::uint32_t logical = 0;
+    std::uint32_t node_tiebreaker = 0;
+};
+
+// Nested durable recovery payload on query status/cancel responses.
+struct DurableOutcome {
+    std::optional<bool> committed;
+    std::optional<std::int64_t> committed_statements;
+    std::optional<std::uint64_t> last_commit_epoch;
+    std::optional<std::string> last_commit_epoch_text;
+    std::optional<CommitHlc> last_commit_hlc;
+    std::optional<std::int64_t> first_commit_statement_index;
+    std::optional<std::int64_t> last_commit_statement_index;
+    std::optional<std::int64_t> completed_statements;
+    std::optional<std::int64_t> statement_index;
+    std::string serialization;
+    std::optional<std::string> serialization_state;
+    std::optional<std::string> terminal_state;
+};
+
+// Decoded GET /queries/{query_id} status for durable recovery (0.64+).
+struct QueryStatus {
+    std::string query_id;
+    std::string status;
+    std::string state;
+    std::string server_state;
+    std::optional<std::string> terminal_state;
+    std::optional<bool> committed;
+    std::optional<std::int64_t> committed_statements;
+    std::optional<std::uint64_t> last_commit_epoch;
+    std::optional<std::string> last_commit_epoch_text;
+    std::optional<CommitHlc> last_commit_hlc;
+    std::optional<std::int64_t> first_commit_statement_index;
+    std::optional<std::int64_t> last_commit_statement_index;
+    std::optional<std::int64_t> completed_statements;
+    std::optional<std::int64_t> statement_index;
+    std::optional<std::string> cancel_outcome;
+    std::string cancellation_reason;
+    bool retryable = false;
+    DurableOutcome outcome;
+    std::optional<DurableOutcome> durable;
+    std::string raw_json;
+
+    // Authoritative HLC: nested durable, then outcome, then top-level.
+    std::optional<CommitHlc> commit_hlc() const {
+        if (durable.has_value() && durable->last_commit_hlc.has_value()) {
+            return durable->last_commit_hlc;
+        }
+        if (outcome.last_commit_hlc.has_value()) {
+            return outcome.last_commit_hlc;
+        }
+        return last_commit_hlc;
+    }
+
+    // Prefer nested durable/outcome serialization_state, then serialization.
+    std::string serialization_state() const {
+        if (durable.has_value()) {
+            if (durable->serialization_state.has_value() &&
+                !durable->serialization_state->empty()) {
+                return *durable->serialization_state;
+            }
+            if (!durable->serialization.empty()) {
+                return durable->serialization;
+            }
+        }
+        if (outcome.serialization_state.has_value() &&
+            !outcome.serialization_state->empty()) {
+            return *outcome.serialization_state;
+        }
+        return outcome.serialization;
+    }
+};
+
+// Result of POST /kit/retrieve_text (0.64+). hits/provenance kept as raw JSON
+// fragments so consumers can parse without a full DOM dependency.
+struct TextRetrieveResult {
+    std::string hits_json = "[]";
+    std::string provenance_json = "{}";
+    std::string raw_json;
 };
 
 // A column definition passed to create_table().
@@ -328,6 +413,20 @@ public:
     // request. For DDL/DML the daemon replies with a status body; for SELECT it
     // returns a JSON array of rows. Either way this returns the raw body.
     std::string sql(const std::string &statement);
+
+    // ── SQL control / durable recovery (0.64+) ───────────────────────────
+    // GET /queries/{query_id} — retained SQL execution status.
+    QueryStatus query_status(const std::string &query_id);
+    // POST /queries/{query_id}/cancel — request cancellation; returns raw body.
+    std::string cancel_query(const std::string &query_id);
+
+    // ── Text retrieve (ANN, 0.64+) ───────────────────────────────────────
+    // POST /kit/retrieve_text — embed text under active semantic identity and
+    // run ANN retrieval. k == 0 omits the k field (server default).
+    TextRetrieveResult retrieve_text(const std::string &table,
+                                      std::int64_t embedding_column,
+                                      const std::string &text,
+                                      std::int64_t k = 0);
 
     // ── Schema ──────────────────────────────────────────────────────────
     std::string schema();

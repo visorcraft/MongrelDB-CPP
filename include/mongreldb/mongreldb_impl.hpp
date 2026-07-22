@@ -444,6 +444,205 @@ inline bool get_bool(const std::string &body, const std::string &key, bool &out)
     }
 }
 
+// Extract a nested JSON object (including braces) as a raw substring.
+inline bool get_object_raw(const std::string &body, const std::string &key,
+                           std::string &out) {
+    JsonParser j(body);
+    if (j.peek() != '{') return false;
+    j.expect('{');
+    if (j.peek() == '}') return false;
+    for (;;) {
+        if (j.peek() != '"') return false;
+        std::string k = j.read_string_raw();
+        if (!j.ok()) return false;
+        j.expect(':');
+        if (!j.ok()) return false;
+        if (k == key && j.peek() == '{') {
+            std::size_t start = j.cursor();
+            j.skip_value();
+            if (!j.ok()) return false;
+            out = body.substr(start, j.cursor() - start);
+            return true;
+        }
+        j.skip_value();
+        if (!j.ok()) return false;
+        int ch = j.peek();
+        if (ch == ',') { j.expect(','); continue; }
+        return ch == '}';
+    }
+}
+
+// Extract a top-level array value as a raw JSON substring.
+inline bool get_array_raw(const std::string &body, const std::string &key,
+                          std::string &out) {
+    JsonParser j(body);
+    if (j.peek() != '{') return false;
+    j.expect('{');
+    if (j.peek() == '}') return false;
+    for (;;) {
+        if (j.peek() != '"') return false;
+        std::string k = j.read_string_raw();
+        if (!j.ok()) return false;
+        j.expect(':');
+        if (!j.ok()) return false;
+        if (k == key && j.peek() == '[') {
+            std::size_t start = j.cursor();
+            j.skip_value();
+            if (!j.ok()) return false;
+            out = body.substr(start, j.cursor() - start);
+            return true;
+        }
+        j.skip_value();
+        if (!j.ok()) return false;
+        int ch = j.peek();
+        if (ch == ',') { j.expect(','); continue; }
+        return ch == '}';
+    }
+}
+
+// Durable recovery parsers (0.64+). Exposed for wire-shape unit tests.
+inline std::optional<CommitHlc> parse_commit_hlc(const std::string &json) {
+    std::uint64_t phys = 0;
+    if (!get_uint64(json, "physical_micros", phys)) {
+        return std::nullopt;
+    }
+    CommitHlc hlc;
+    hlc.physical_micros = phys;
+    std::int64_t logical = 0;
+    std::int64_t tie = 0;
+    if (get_int(json, "logical", logical)) {
+        hlc.logical = static_cast<std::uint32_t>(logical);
+    }
+    if (get_int(json, "node_tiebreaker", tie)) {
+        hlc.node_tiebreaker = static_cast<std::uint32_t>(tie);
+    }
+    return hlc;
+}
+
+inline DurableOutcome parse_durable_outcome(const std::string &json) {
+    DurableOutcome out;
+    if (json.empty()) {
+        return out;
+    }
+    bool b = false;
+    if (get_bool(json, "committed", b)) {
+        out.committed = b;
+    }
+    std::int64_t n = 0;
+    if (get_int(json, "committed_statements", n)) {
+        out.committed_statements = n;
+    }
+    std::uint64_t u = 0;
+    if (get_uint64(json, "last_commit_epoch", u)) {
+        out.last_commit_epoch = u;
+    }
+    std::string s;
+    if (get_string(json, "last_commit_epoch_text", s)) {
+        out.last_commit_epoch_text = s;
+    }
+    std::string hlc_raw;
+    if (get_object_raw(json, "last_commit_hlc", hlc_raw)) {
+        out.last_commit_hlc = parse_commit_hlc(hlc_raw);
+    }
+    if (get_int(json, "first_commit_statement_index", n)) {
+        out.first_commit_statement_index = n;
+    }
+    if (get_int(json, "last_commit_statement_index", n)) {
+        out.last_commit_statement_index = n;
+    }
+    if (get_int(json, "completed_statements", n)) {
+        out.completed_statements = n;
+    }
+    if (get_int(json, "statement_index", n)) {
+        out.statement_index = n;
+    }
+    if (get_string(json, "serialization", s)) {
+        out.serialization = s;
+    }
+    if (get_string(json, "serialization_state", s)) {
+        out.serialization_state = s;
+    }
+    if (get_string(json, "terminal_state", s)) {
+        out.terminal_state = s;
+    }
+    return out;
+}
+
+inline QueryStatus parse_query_status_json(const std::string &json) {
+    QueryStatus st;
+    st.raw_json = json;
+    std::string s;
+    if (get_string(json, "query_id", s)) st.query_id = s;
+    if (get_string(json, "status", s)) st.status = s;
+    if (get_string(json, "state", s)) st.state = s;
+    if (get_string(json, "server_state", s)) {
+        st.server_state = s;
+    } else {
+        st.server_state = st.state;
+    }
+    if (get_string(json, "terminal_state", s)) st.terminal_state = s;
+    bool b = false;
+    if (get_bool(json, "committed", b)) st.committed = b;
+    std::int64_t n = 0;
+    if (get_int(json, "committed_statements", n)) st.committed_statements = n;
+    std::uint64_t u = 0;
+    if (get_uint64(json, "last_commit_epoch", u)) st.last_commit_epoch = u;
+    if (get_string(json, "last_commit_epoch_text", s)) st.last_commit_epoch_text = s;
+    std::string hlc_raw;
+    if (get_object_raw(json, "last_commit_hlc", hlc_raw)) {
+        st.last_commit_hlc = parse_commit_hlc(hlc_raw);
+    }
+    if (get_int(json, "first_commit_statement_index", n)) {
+        st.first_commit_statement_index = n;
+    }
+    if (get_int(json, "last_commit_statement_index", n)) {
+        st.last_commit_statement_index = n;
+    }
+    if (get_int(json, "completed_statements", n)) st.completed_statements = n;
+    if (get_int(json, "statement_index", n)) st.statement_index = n;
+    if (get_string(json, "cancel_outcome", s)) st.cancel_outcome = s;
+    if (get_string(json, "cancellation_reason", s)) st.cancellation_reason = s;
+    if (get_bool(json, "retryable", b)) st.retryable = b;
+    std::string obj;
+    if (get_object_raw(json, "outcome", obj)) {
+        st.outcome = parse_durable_outcome(obj);
+    }
+    if (get_object_raw(json, "durable", obj)) {
+        st.durable = parse_durable_outcome(obj);
+    }
+    return st;
+}
+
+inline std::string build_retrieve_text_body(const std::string &table,
+                                            std::int64_t embedding_column,
+                                            const std::string &text,
+                                            std::int64_t k) {
+    std::string body = "{\"table\":";
+    json_escape(body, table);
+    body += ",\"embedding_column\":" + std::to_string(embedding_column);
+    body += ",\"text\":";
+    json_escape(body, text);
+    if (k > 0) {
+        body += ",\"k\":" + std::to_string(k);
+    }
+    body.push_back('}');
+    return body;
+}
+
+inline TextRetrieveResult parse_text_retrieve_result(const std::string &json) {
+    TextRetrieveResult r;
+    r.raw_json = json;
+    std::string hits;
+    if (get_array_raw(json, "hits", hits)) {
+        r.hits_json = hits;
+    }
+    std::string prov;
+    if (get_object_raw(json, "provenance", prov)) {
+        r.provenance_json = prov;
+    }
+    return r;
+}
+
 // ── HTTP plumbing ───────────────────────────────────────────────────────
 
 inline size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
@@ -1231,6 +1430,34 @@ inline std::string MongrelDBClient::sql(const std::string &statement) {
     json_escape(body, statement);
     body += ",\"format\":\"json\"}";
     return impl_->post("/sql", body);
+}
+
+inline QueryStatus MongrelDBClient::query_status(const std::string &query_id) {
+    if (query_id.empty()) {
+        throw QueryException("mongreldb: query_id is required");
+    }
+    std::string body = impl_->get("/queries/" + url_encode_segment(query_id));
+    return detail::parse_query_status_json(body);
+}
+
+inline std::string MongrelDBClient::cancel_query(const std::string &query_id) {
+    if (query_id.empty()) {
+        throw QueryException("mongreldb: query_id is required");
+    }
+    return impl_->post(
+        "/queries/" + url_encode_segment(query_id) + "/cancel", "{}");
+}
+
+inline TextRetrieveResult MongrelDBClient::retrieve_text(
+    const std::string &table, std::int64_t embedding_column,
+    const std::string &text, std::int64_t k) {
+    if (table.empty() || text.empty()) {
+        throw QueryException("mongreldb: table and text are required");
+    }
+    std::string body =
+        detail::build_retrieve_text_body(table, embedding_column, text, k);
+    std::string resp = impl_->post("/kit/retrieve_text", body);
+    return detail::parse_text_retrieve_result(resp);
 }
 
 inline std::string MongrelDBClient::schema() {
