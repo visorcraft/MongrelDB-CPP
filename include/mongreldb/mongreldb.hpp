@@ -30,8 +30,8 @@ namespace mongreldb {
 
 inline constexpr int kVersionMajor = 0;
 inline constexpr int kVersionMinor = 65;
-inline constexpr int kVersionPatch = 0;
-inline constexpr const char *kVersion = "0.65.0";
+inline constexpr int kVersionPatch = 1;
+inline constexpr const char *kVersion = "0.65.1";
 
 inline constexpr const char *kDefaultUrl = "http://127.0.0.1:8453";
 
